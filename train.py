@@ -54,7 +54,7 @@ try:
 except ImportError:
     TENSORBOARD_FOUND = False
     print("not found tf board")
-
+from scene.external import get_add_point,MutiPlane_anchor_init , get_depth_mask, get_vector, error_map, gaussian_decomp # 修改 导入scene/external.py中的函数
 def saveRuntimeCode(dst: str) -> None:
     additionalIgnorePatterns = ['.git', '.gitignore']
     ignorePatterns = set()
@@ -89,7 +89,31 @@ def training(dataset, opt, pipe, dataset_name, testing_iterations, saving_iterat
     if checkpoint:
         (model_params, first_iter) = torch.load(checkpoint)
         gaussians.restore(model_params, opt)
+#修改
+    viewpoint_stack = scene.getTrainCameras().copy()
+    resample_num = 4
+    for num in range(resample_num):
+        idx = randint(0, len(viewpoint_stack) - 1)
+        resample_cam = viewpoint_stack[idx]
 
+        # 如果已经有 anchor
+        if hasattr(gaussians, "_anchor"):
+            xyz = gaussians._anchor
+        else:
+            xyz = torch.zeros((0, 3), device="cuda")
+         # 多平面生成 anchor
+        #print("....depth的形状：",resample_cam.depth.shape)
+        init_xyz, init_features = MutiPlane_anchor_init(
+            monodepth=resample_cam.depth,
+            xyz=xyz,
+            view_camera=resample_cam,
+            plane_num=10,
+            #sample_size=opt.sample_win_size,
+            sample_size=10,
+            muti_mode="neighbor",
+            itera_num=num
+        )
+        gaussians.add_MultiPlane_anchor(new_xyzs=init_xyz, new_features=init_features)
     iter_start = torch.cuda.Event(enable_timing = True)
     iter_end = torch.cuda.Event(enable_timing = True)
 
@@ -132,6 +156,10 @@ def training(dataset, opt, pipe, dataset_name, testing_iterations, saving_iterat
             pipe.debug = True
         
         voxel_visible_mask = prefilter_voxel(viewpoint_cam, gaussians, pipe,background)
+        retain_grad = False
+        if iteration < opt.update_until and iteration >= 0:
+            retain_grad = True
+
         retain_grad = (iteration < opt.update_until and iteration >= 0)
         render_pkg = render(viewpoint_cam, gaussians, pipe, background, visible_mask=voxel_visible_mask, retain_grad=retain_grad)
         
@@ -144,8 +172,8 @@ def training(dataset, opt, pipe, dataset_name, testing_iterations, saving_iterat
         scaling_reg = scaling.prod(dim=1).mean()
         loss = (1.0 - opt.lambda_dssim) * Ll1 + opt.lambda_dssim * ssim_loss + 0.01*scaling_reg
 
-        loss.backward()
-        
+        #loss.backward()
+        loss.backward(retain_graph=retain_grad)
         iter_end.record()
 
         with torch.no_grad():
@@ -170,21 +198,39 @@ def training(dataset, opt, pipe, dataset_name, testing_iterations, saving_iterat
                 gaussians.training_statis(viewspace_point_tensor, opacity, visibility_filter, offset_selection_mask, voxel_visible_mask)
                 
                 # densification
+                # if iteration > opt.update_from and iteration % opt.update_interval == 0:
+                #     gaussians.adjust_anchor(check_interval=opt.update_interval, success_threshold=opt.success_threshold, grad_threshold=opt.densify_grad_threshold, min_opacity=opt.min_opacity)
+                #     if iteration >= 1000 and iteration <= 3000 and iteration % 1000 == 0:
+                #         gaussians.prune_point_ours_small(num=args.prune_num1, std=args.prune_std1, planer_numer=16)
+                #     elif iteration > 3000 and iteration % 2000 == 0 and iteration < opt.update_until - 2000:
+                #         gaussians.prune_point_ours_small(num=args.prune_num2, std=args.prune_std2, planer_numer=16)
+                # 修改后代码
                 if iteration > opt.update_from and iteration % opt.update_interval == 0:
-                    gaussians.adjust_anchor(check_interval=opt.update_interval, success_threshold=opt.success_threshold, grad_threshold=opt.densify_grad_threshold, min_opacity=opt.min_opacity)
+                    gaussians.adjust_anchor(
+                        check_interval=opt.update_interval, 
+                        success_threshold=opt.success_threshold, 
+                        grad_threshold=opt.densify_grad_threshold,  # 🟩 使用调整后的阈值（可能更高）
+                        min_opacity=opt.min_opacity
+                    )
+    
+                    # 🟩 更温和的剪枝策略
+                    if iteration >= 1500 and iteration <= 5000 and iteration % 1500 == 0:
+                        gaussians.prune_point_ours_small(num=args.prune_num1, std=args.prune_std1, planer_numer=16)
+                    elif iteration > 5000 and iteration % 3000 == 0 and iteration < opt.update_until - 3000:
+                        gaussians.prune_point_ours_small(num=args.prune_num2, std=args.prune_std2, planer_numer=16)
             elif iteration == opt.update_until:
                 del gaussians.opacity_accum
                 del gaussians.offset_gradient_accum
                 del gaussians.offset_denom
-                torch.cuda.empty_cache()
+                torch.cuda.empty_cache()      
                     
-            # Optimizer step
+                    # Optimizer step
             if iteration < opt.iterations:
-                gaussians.optimizer.step()
-                gaussians.optimizer.zero_grad(set_to_none = True)
+                        gaussians.optimizer.step()
+                        gaussians.optimizer.zero_grad(set_to_none = True)
             if (iteration in checkpoint_iterations):
-                logger.info("\n[ITER {}] Saving Checkpoint".format(iteration))
-                torch.save((gaussians.capture(), iteration), scene.model_path + "/chkpnt" + str(iteration) + ".pth")
+                        logger.info("\n[ITER {}] Saving Checkpoint".format(iteration))
+                        torch.save((gaussians.capture(), iteration), scene.model_path + "/chkpnt" + str(iteration) + ".pth")         
 
 def prepare_output_and_logger(args):    
     if not args.model_path:

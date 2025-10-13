@@ -39,11 +39,12 @@ class CameraInfo(NamedTuple):
     FovY: np.array
     FovX: np.array
     image: np.array
+    focal: np.array
     image_path: str
     image_name: str
     width: int
     height: int
-
+    depth: np.array #增加深度
 class SceneInfo(NamedTuple):
     point_cloud: BasicPointCloud
     train_cameras: list
@@ -111,8 +112,10 @@ def readColmapCameras(cam_extrinsics, cam_intrinsics, images_folder):
         image = Image.open(image_path)
 
         # print(f'image: {image.size}')
-
-        cam_info = CameraInfo(uid=uid, R=R, T=T, FovY=FovY, FovX=FovX, image=image,
+        depth_folder = os.path.join(os.path.dirname(images_folder), "DPT_depth") #往上退一层
+        depth_path=os.path.join(depth_folder,f"{image_name}.npy")
+        depth=np.load(depth_path)
+        cam_info = CameraInfo(uid=uid, R=R, T=T, FovY=FovY, FovX=FovX, image=image,depth=depth,focal=intr.params,
                               image_path=image_path, image_name=image_name, width=width, height=height)
         cam_infos.append(cam_info)
     sys.stdout.write('\n')

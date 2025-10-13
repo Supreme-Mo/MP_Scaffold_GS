@@ -22,7 +22,7 @@ from simple_knn._C import distCUDA2
 from utils.graphics_utils import BasicPointCloud
 from utils.general_utils import strip_symmetric, build_scaling_rotation
 from scene.embedding import Embedding
-
+import open3d as o3d
     
 class GaussianModel:
 
@@ -478,29 +478,64 @@ class GaussianModel:
         return optimizable_tensors
 
 
+    # def cat_tensors_to_optimizer(self, tensors_dict):
+    #     optimizable_tensors = {}
+    #     for group in self.optimizer.param_groups:
+    #         if  'mlp' in group['name'] or \
+    #             'conv' in group['name'] or \
+    #             'feat_base' in group['name'] or \
+    #             'embedding' in group['name']:
+    #             continue
+    #         assert len(group["params"]) == 1
+    #         extension_tensor = tensors_dict[group["name"]]
+    #         stored_state = self.optimizer.state.get(group['params'][0], None)
+    #         if stored_state is not None:
+    #             stored_state["exp_avg"] = torch.cat((stored_state["exp_avg"], torch.zeros_like(extension_tensor)), dim=0)
+    #             stored_state["exp_avg_sq"] = torch.cat((stored_state["exp_avg_sq"], torch.zeros_like(extension_tensor)), dim=0)
+
+    #             del self.optimizer.state[group['params'][0]]
+    #             group["params"][0] = nn.Parameter(torch.cat((group["params"][0], extension_tensor), dim=0).requires_grad_(True))
+    #             self.optimizer.state[group['params'][0]] = stored_state
+
+    #             optimizable_tensors[group["name"]] = group["params"][0]
+    #         else:
+    #             group["params"][0] = nn.Parameter(torch.cat((group["params"][0], extension_tensor), dim=0).requires_grad_(True))
+    #             optimizable_tensors[group["name"]] = group["params"][0]
+
+    #     return optimizable_tensors
+#修改
     def cat_tensors_to_optimizer(self, tensors_dict):
         optimizable_tensors = {}
+
         for group in self.optimizer.param_groups:
-            if  'mlp' in group['name'] or \
-                'conv' in group['name'] or \
-                'feat_base' in group['name'] or \
-                'embedding' in group['name']:
+            # 跳过非 anchor 参数
+            if any(x in group['name'] for x in ['mlp', 'conv', 'feat_base', 'embedding']):
                 continue
+
             assert len(group["params"]) == 1
+            param = group["params"][0]
             extension_tensor = tensors_dict[group["name"]]
-            stored_state = self.optimizer.state.get(group['params'][0], None)
-            if stored_state is not None:
-                stored_state["exp_avg"] = torch.cat((stored_state["exp_avg"], torch.zeros_like(extension_tensor)), dim=0)
-                stored_state["exp_avg_sq"] = torch.cat((stored_state["exp_avg_sq"], torch.zeros_like(extension_tensor)), dim=0)
+            
+            # ===== 改动：保证 stored_state 不为 None =====
+            stored_state = self.optimizer.state.get(param, {})  # 原来是 None 会导致 KeyError
 
-                del self.optimizer.state[group['params'][0]]
-                group["params"][0] = nn.Parameter(torch.cat((group["params"][0], extension_tensor), dim=0).requires_grad_(True))
-                self.optimizer.state[group['params'][0]] = stored_state
+            # ===== 改动：安全扩展 exp_avg 和 exp_avg_sq =====
+            for key in ["exp_avg", "exp_avg_sq"]:
+                if key in stored_state and isinstance(stored_state[key], torch.Tensor):
+                    stored_state[key] = torch.cat([stored_state[key], torch.zeros_like(extension_tensor)], dim=0)
+                else:
+                    stored_state[key] = torch.zeros_like(extension_tensor)
 
-                optimizable_tensors[group["name"]] = group["params"][0]
-            else:
-                group["params"][0] = nn.Parameter(torch.cat((group["params"][0], extension_tensor), dim=0).requires_grad_(True))
-                optimizable_tensors[group["name"]] = group["params"][0]
+            # ===== 改动：创建新参数 =====
+            new_param = nn.Parameter(torch.cat([param, extension_tensor], dim=0).requires_grad_(True))
+
+            # ===== 改动：删除旧参数前先判断 =====
+            if param in self.optimizer.state:
+                del self.optimizer.state[param]
+            group["params"][0] = new_param
+            self.optimizer.state[new_param] = stored_state
+
+            optimizable_tensors[group["name"]] = new_param
 
         return optimizable_tensors
 
@@ -527,43 +562,143 @@ class GaussianModel:
         grad_norm = torch.norm(viewspace_point_tensor.grad[update_filter,:2], dim=-1, keepdim=True)
         self.offset_gradient_accum[combined_mask] += grad_norm
         self.offset_denom[combined_mask] += 1
-
+    
         
 
         
+    # def _prune_anchor_optimizer(self, mask):
+    #     optimizable_tensors = {}
+    #     for group in self.optimizer.param_groups:
+    #         if  'mlp' in group['name'] or \
+    #             'conv' in group['name'] or \
+    #             'feat_base' in group['name'] or \
+    #             'embedding' in group['name']:
+    #             continue
+
+    #         stored_state = self.optimizer.state.get(group['params'][0], None)
+    #         if stored_state is not None:
+    #             stored_state["exp_avg"] = stored_state["exp_avg"][mask]
+    #             stored_state["exp_avg_sq"] = stored_state["exp_avg_sq"][mask]
+
+    #             del self.optimizer.state[group['params'][0]]
+    #             group["params"][0] = nn.Parameter((group["params"][0][mask].requires_grad_(True)))
+    #             self.optimizer.state[group['params'][0]] = stored_state
+    #             if group['name'] == "scaling":
+    #                 scales = group["params"][0]
+    #                 temp = scales[:,3:]
+    #                 temp[temp>0.05] = 0.05
+    #                 group["params"][0][:,3:] = temp
+    #             optimizable_tensors[group["name"]] = group["params"][0]
+    #         else:
+    #             group["params"][0] = nn.Parameter(group["params"][0][mask].requires_grad_(True))
+    #             if group['name'] == "scaling":
+    #                 scales = group["params"][0]
+    #                 temp = scales[:,3:]
+    #                 temp[temp>0.05] = 0.05
+    #                 group["params"][0][:,3:] = temp
+    #             optimizable_tensors[group["name"]] = group["params"][0]
+            
+            
+    #     return optimizable_tensors
+    # def _prune_anchor_optimizer(self, mask):
+    #     """
+    #     在 anchor 被 prune 时同步更新 optimizer 参数与其动量缓存
+    #     mask: (N,) bool 张量，True 表示保留
+    #     """
+    #     optimizable_tensors = {}
+
+    #     for group in self.optimizer.param_groups:
+    #         # 跳过非 anchor 参数
+    #         if any(x in group['name'] for x in ['mlp', 'conv', 'feat_base', 'embedding']):
+    #             continue
+
+    #         param = group['params'][0]
+    #         stored_state = self.optimizer.state.get(param, None)
+
+    #         # 新参数 = 按 mask 过滤
+    #         new_param_data = param[mask]
+    #         new_param = nn.Parameter(new_param_data.requires_grad_(True))
+
+    #         if stored_state is not None:
+    #             new_state = {}
+    #             for key, val in stored_state.items():
+    #                 if not isinstance(val, torch.Tensor):
+    #                     # 跳过标量或非 tensor
+    #                     new_state[key] = val
+    #                     continue
+
+    #                 # 如果动量张量维度匹配 mask（即首维 == len(mask)）
+    #                 if val.shape[0] == mask.shape[0]:
+    #                     try:
+    #                         new_state[key] = val[mask]
+    #                     except Exception as e:
+    #                         print(f"[Warning] skip optimizer state key={key} due to mismatch: {e}")
+    #                         new_state[key] = val.clone()
+    #                 else:
+    #                     # ⚠️ 不匹配时直接保留旧值（避免 IndexError）
+    #                     print(f"[Warning] Optimizer state '{key}' shape {val.shape} != mask {mask.shape}, skipping prune.")
+    #                     new_state[key] = val.clone()
+
+    #             # 更新 optimizer state
+    #             del self.optimizer.state[param]
+    #             group["params"][0] = new_param
+    #             self.optimizer.state[new_param] = new_state
+    #         else:
+    #             group["params"][0] = new_param
+
+    #         # 限制 scaling 的范围（防止数值爆炸）
+    #         if group['name'] == "scaling":
+    #             scales = group["params"][0]
+    #             temp = scales[:, 3:]
+    #             temp[temp > 0.05] = 0.05
+    #             group["params"][0][:, 3:] = temp
+
+    #         optimizable_tensors[group["name"]] = group["params"][0]
+
+    #     return optimizable_tensors
     def _prune_anchor_optimizer(self, mask):
         optimizable_tensors = {}
+
         for group in self.optimizer.param_groups:
-            if  'mlp' in group['name'] or \
-                'conv' in group['name'] or \
-                'feat_base' in group['name'] or \
-                'embedding' in group['name']:
+            if 'mlp' in group['name'] or \
+            'conv' in group['name'] or \
+            'feat_base' in group['name'] or \
+            'embedding' in group['name']:
                 continue
 
-            stored_state = self.optimizer.state.get(group['params'][0], None)
-            if stored_state is not None:
-                stored_state["exp_avg"] = stored_state["exp_avg"][mask]
-                stored_state["exp_avg_sq"] = stored_state["exp_avg_sq"][mask]
+            param = group['params'][0]
+            stored_state = self.optimizer.state.get(param, None)
 
-                del self.optimizer.state[group['params'][0]]
-                group["params"][0] = nn.Parameter((group["params"][0][mask].requires_grad_(True)))
-                self.optimizer.state[group['params'][0]] = stored_state
-                if group['name'] == "scaling":
-                    scales = group["params"][0]
-                    temp = scales[:,3:]
-                    temp[temp>0.05] = 0.05
-                    group["params"][0][:,3:] = temp
-                optimizable_tensors[group["name"]] = group["params"][0]
+            # 安全处理 exp_avg / exp_avg_sq
+            if stored_state is not None:
+                new_state = {}
+                for k, v in stored_state.items():
+                    if isinstance(v, torch.Tensor) and v.dim() > 0 and v.shape[0] == param.shape[0]:
+                        new_state[k] = v[mask]
+                    else:
+                        new_state[k] = v
+                # 删除旧 state
+                del self.optimizer.state[param]
             else:
-                group["params"][0] = nn.Parameter(group["params"][0][mask].requires_grad_(True))
-                if group['name'] == "scaling":
-                    scales = group["params"][0]
-                    temp = scales[:,3:]
-                    temp[temp>0.05] = 0.05
-                    group["params"][0][:,3:] = temp
-                optimizable_tensors[group["name"]] = group["params"][0]
-            
-            
+                new_state = None
+
+            # 更新参数
+            new_param = nn.Parameter(param[mask].requires_grad_(True))
+            group['params'][0] = new_param
+
+            # 限制 scaling 特定维度
+            if group['name'] == "scaling":
+                scales = group['params'][0]
+                temp = scales[:, 3:]
+                temp[temp > 0.05] = 0.05
+                group['params'][0][:, 3:] = temp
+
+            # 恢复 optimizer state
+            if new_state is not None:
+                self.optimizer.state[new_param] = new_state
+
+            optimizable_tensors[group["name"]] = new_param  
+
         return optimizable_tensors
 
     def prune_anchor(self,mask):
@@ -578,7 +713,148 @@ class GaussianModel:
         self._scaling = optimizable_tensors["scaling"]
         self._rotation = optimizable_tensors["rotation"]
 
-    
+        
+    def add_MultiPlane_anchor(self, new_xyzs, new_features=None): # 修改
+        """
+        为多平面初始化增加 anchor 点
+        new_xyzs: 新增点 (N,3) Tensor
+        new_features: 新增特征 (N,F) Tensor，可为 None
+        """
+        new_n = new_xyzs.shape[0]
+        device = new_xyzs.device
+        # 增加 anchor 坐标
+        if hasattr(self, "_anchor"):
+            self._anchor = torch.cat((self._anchor, new_xyzs), dim=0).contiguous()
+            if new_features is not None:
+                if hasattr(self, "_anchor_feat"):
+                    self._anchor_feat = torch.cat((self._anchor_feat, new_features), dim=0).contiguous()
+                else:
+                    self._anchor_feat = new_features.clone()
+        else:
+            self._anchor = new_xyzs.clone()
+            self._anchor_feat = new_features.clone() if new_features is not None else None
+        if hasattr(self, "_offset") and self._offset is not None:
+            # _offset 的 shape: [M_old, n_offsets, 3]
+            old_n = self._offset.shape[0]
+            if new_n > 0:
+                new_offsets = torch.zeros((new_n, self.n_offsets, 3), device=device, dtype=self._offset.dtype)
+                self._offset = torch.cat([self._offset, new_offsets], dim=0).contiguous()
+        else:
+            # 如果不存在，则创建 shape 对齐的全零 offset
+            total_n = self._anchor.shape[0]
+            self._offset = torch.zeros((total_n, self.n_offsets, 3), device=device)
+        if hasattr(self, "_scaling") and self._scaling is not None:
+            old_n = self._scaling.shape[0]
+            if new_n > 0:
+                # scaling shape assumed [M, 2] 或者 [M, something], 保持一致性
+                pad_shape = list(self._scaling.shape)
+                pad_shape[0] = new_n
+                pad = torch.zeros(tuple(pad_shape), device=device, dtype=self._scaling.dtype)
+                self._scaling = torch.cat([self._scaling, pad], dim=0).contiguous()
+        else:
+            # 默认初始化：取 voxel_size 或者 1
+            scaling_dim = getattr(self, "_scaling_dim", 6)  # 如果模型有 _scaling_dim 属性则用它，否则默认 6
+            default_scaling = torch.ones((self._anchor.shape[0], scaling_dim), device=device) * (getattr(self, "voxel_size", 1.0))
+            self._scaling = default_scaling
+
+        # --- 扩展 rotation ---
+        if hasattr(self, "_rotation") and self._rotation is not None:
+            pad = torch.zeros((new_n, self._rotation.shape[1]), device=device, dtype=self._rotation.dtype)
+            pad[:, 0] = 1.0  # identity quat
+            self._rotation = torch.cat([self._rotation, pad], dim=0).contiguous()
+        else:
+            self._rotation = torch.zeros((self._anchor.shape[0], 4), device=device)
+            self._rotation[:, 0] = 1.0
+
+        # --- 扩展 opacity & opacity_accum ---
+        if hasattr(self, "_opacity") and self._opacity is not None:
+            pad = torch.zeros((new_n, self._opacity.shape[1]), device=device, dtype=self._opacity.dtype)
+            self._opacity = torch.cat([self._opacity, pad], dim=0).contiguous()
+        else:
+            self._opacity = torch.zeros((self._anchor.shape[0], 1), device=device)
+
+        if hasattr(self, "opacity_accum") and self.opacity_accum is not None:
+            pad = torch.zeros((new_n, self.opacity_accum.shape[1]), device=device, dtype=self.opacity_accum.dtype)
+            self.opacity_accum = torch.cat([self.opacity_accum, pad], dim=0).contiguous()
+        else:
+            self.opacity_accum = torch.zeros((self._anchor.shape[0], 1), device=device)
+
+        # --- 扩展 anchor_demon（如果有） ---
+        if hasattr(self, "anchor_demon") and self.anchor_demon is not None:
+            pad = torch.zeros((new_n, self.anchor_demon.shape[1]), device=device, dtype=self.anchor_demon.dtype)
+            self.anchor_demon = torch.cat([self.anchor_demon, pad], dim=0).contiguous()
+        else:
+            self.anchor_demon = torch.zeros((self._anchor.shape[0], 1), device=device)
+        # 扩展 offset_gradient_accum
+        if hasattr(self, "offset_gradient_accum"):
+            pad = torch.zeros((new_n*self.n_offsets, 1), device=device)
+            self.offset_gradient_accum = torch.cat([self.offset_gradient_accum, pad], dim=0)
+        else:
+            self.offset_gradient_accum = torch.zeros((self.get_anchor.shape[0]*self.n_offsets, 1), device=device)
+
+        # 扩展 offset_denom
+        if hasattr(self, "offset_denom"):
+            pad = torch.zeros((new_n*self.n_offsets, 1), device=device)
+            self.offset_denom = torch.cat([self.offset_denom, pad], dim=0)
+        else:
+            self.offset_denom = torch.zeros((self.get_anchor.shape[0]*self.n_offsets, 1), device=device)
+    # --- 同步优化器参数 ---
+        # if hasattr(self, "optimizer") and self.optimizer is not None:
+        #     for group in self.optimizer.param_groups:
+        #         param = group['params'][0]
+        #         # 仅扩展 anchor 相关参数
+        #         if any(x in group['name'] for x in ['mlp', 'conv', 'feat_base', 'embedding']):
+        #             continue
+
+        #         # 扩展参数
+        #         new_param_data = torch.cat([param.data, torch.zeros((new_n,) + tuple(param.shape[1:]), device=device)], dim=0)
+        #         new_param = nn.Parameter(new_param_data.requires_grad_(True))
+
+        #         # 扩展 optimizer 动量状态
+        #         old_state = self.optimizer.state.get(param, {})
+        #         new_state = {}
+        #         for k, v in old_state.items():
+        #             if isinstance(v, torch.Tensor) and v.shape[0] == param.shape[0]:
+        #                 pad = torch.zeros((new_n,) + tuple(v.shape[1:]), device=v.device, dtype=v.dtype)
+        #                 new_state[k] = torch.cat([v, pad], dim=0)
+        #             else:
+        #                 new_state[k] = v
+
+        #         # 替换参数与状态
+        #         del self.optimizer.state[param]
+        #         group['params'][0] = new_param
+        #         self.optimizer.state[new_param] = new_state
+
+        #     print(f"[Info] Added {new_n} anchors and synchronized optimizer.")
+        if hasattr(self, "optimizer") and self.optimizer is not None:
+            for group in self.optimizer.param_groups:
+                param = group['params'][0]
+                if any(x in group['name'] for x in ['mlp', 'conv', 'feat_base', 'embedding']):
+                    continue
+
+                # 扩展参数
+                new_param_data = torch.cat(
+                    [param.data, torch.zeros((new_n,) + tuple(param.shape[1:]), device=param.device)],
+                    dim=0
+                )
+                new_param = nn.Parameter(new_param_data.requires_grad_(True))
+
+                # 扩展 optimizer state
+                old_state = self.optimizer.state.get(param, {})
+                new_state = {}
+                for k, v in old_state.items():
+                    if isinstance(v, torch.Tensor) and v.shape[0] == param.shape[0]:
+                        pad = torch.zeros((new_n,) + tuple(v.shape[1:]), device=v.device, dtype=v.dtype)
+                        new_state[k] = torch.cat([v, pad], dim=0)
+                    else:
+                        new_state[k] = v
+
+                # 替换参数与状态
+                group['params'][0] = new_param
+                self.optimizer.state[new_param] = new_state
+                if param in self.optimizer.state:
+                    del self.optimizer.state[param]
+
     def anchor_growing(self, grads, threshold, offset_mask):
         ## 
         init_length = self.get_anchor.shape[0]*self.n_offsets
@@ -700,11 +976,20 @@ class GaussianModel:
                                            device=self.offset_gradient_accum.device)
         self.offset_gradient_accum = torch.cat([self.offset_gradient_accum, padding_offset_gradient_accum], dim=0)
         
-        # # prune anchors
-        prune_mask = (self.opacity_accum < min_opacity*self.anchor_demon).squeeze(dim=1)
+        # # prune anchors (修改)
+        # prune_mask = (self.opacity_accum < min_opacity*self.anchor_demon).squeeze(dim=1)
         anchors_mask = (self.anchor_demon > check_interval*success_threshold).squeeze(dim=1) # [N, 1]
-        prune_mask = torch.logical_and(prune_mask, anchors_mask) # [N] 
-        
+        # prune_mask = torch.logical_and(prune_mask, anchors_mask) # [N] 
+        num_anchors = self._anchor.shape[0]
+        prune_mask_full = torch.zeros(num_anchors, dtype=torch.bool, device=self._anchor.device)
+
+        # 旧 anchor 的 mask
+        old_n = min(self.opacity_accum.shape[0], num_anchors)  # 注意 safeguard
+        prune_mask_full[:old_n] = torch.logical_and(
+            (self.opacity_accum[:old_n] < min_opacity*self.anchor_demon[:old_n]).squeeze(dim=1),
+            (self.anchor_demon[:old_n] > check_interval*success_threshold).squeeze(dim=1)
+        )
+        prune_mask = prune_mask_full
         # update offset_denom
         offset_denom = self.offset_denom.view([-1, self.n_offsets])[~prune_mask]
         offset_denom = offset_denom.view([-1, 1])
@@ -810,3 +1095,66 @@ class GaussianModel:
                 self.embedding_appearance.load_state_dict(checkpoint['appearance'])
         else:
             raise NotImplementedError
+    def prune_point_ours_small(self, num, std, planer_numer=None):
+        """
+        基于 anchor 坐标对高斯进行小规模裁剪（统计异常点剔除）。
+        :param num: open3d remove_statistical_outlier 的邻居数
+        :param std: open3d remove_statistical_outlier 的标准差倍数阈值
+        :param planer_numer: 分层数量，如果为 None，则对所有 anchor 统一处理
+        """
+        anchors = self._anchors  # 或 self.anchors，根据实际属性
+        num_anchors = anchors.shape[0]
+
+        if planer_numer is None:
+            # -----------------------------
+            # 全局统计剔除
+            # -----------------------------
+            pcd_vector = o3d.geometry.PointCloud()
+            pcd_vector.points = o3d.utility.Vector3dVector(anchors.detach().cpu().numpy())
+            _, ind = pcd_vector.remove_statistical_outlier(num, std)
+
+            mask_point_temp = torch.zeros(num_anchors, dtype=torch.bool, device=anchors.device)
+            mask_point_temp[ind] = True
+
+            # prune_points 接受 False 表示删除
+            self.prune_points(~mask_point_temp)
+            torch.cuda.empty_cache()
+
+        else:
+            # -----------------------------
+            # 按 z 轴分层进行统计剔除
+            # -----------------------------
+            depth_min = anchors[:, 2].min()
+            depth_max = anchors[:, 2].max()
+            depth_vector = (depth_max - depth_min) / planer_numer
+
+            # 给每个 anchor 一个层编号（1~planer_numer）
+            depth_mask = torch.zeros(num_anchors, dtype=torch.int, device=anchors.device)
+            for i in range(planer_numer):
+                lower = depth_min + i * depth_vector
+                upper = depth_min + (i + 1) * depth_vector
+                # 每个点只属于一个层
+                mask = (anchors[:, 2] > lower) & (anchors[:, 2] <= upper)
+                depth_mask[mask] = i + 1
+
+            mask_point_temp = torch.zeros(num_anchors, dtype=torch.bool, device=anchors.device)
+
+            # 分层剔除
+            for i in range(1, planer_numer + 1):
+                muti_mask = depth_mask == i
+                if torch.sum(muti_mask) < num * 10:
+                    continue
+
+                pcd_vector = o3d.geometry.PointCloud()
+                pcd_vector.points = o3d.utility.Vector3dVector(anchors[muti_mask].detach().cpu().numpy())
+                _, ind = pcd_vector.remove_statistical_outlier(num, std)
+
+                mask_t = torch.zeros(torch.sum(muti_mask), dtype=torch.bool, device=anchors.device)
+                mask_t[ind] = True
+
+                # 更新当前层 mask
+                mask_point_temp[muti_mask] = mask_t
+
+            # prune_points 接受 False 表示删除
+            self.prune_points(~mask_point_temp)
+            torch.cuda.empty_cache()
