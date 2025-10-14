@@ -91,7 +91,7 @@ def training(dataset, opt, pipe, dataset_name, testing_iterations, saving_iterat
         gaussians.restore(model_params, opt)
 #修改
     viewpoint_stack = scene.getTrainCameras().copy()
-    resample_num = 4
+    resample_num = 1
     for num in range(resample_num):
         idx = randint(0, len(viewpoint_stack) - 1)
         resample_cam = viewpoint_stack[idx]
@@ -107,11 +107,11 @@ def training(dataset, opt, pipe, dataset_name, testing_iterations, saving_iterat
             monodepth=resample_cam.depth,
             xyz=xyz,
             view_camera=resample_cam,
-            plane_num=10,
+            plane_num=16,
             #sample_size=opt.sample_win_size,
-            sample_size=10,
+            sample_size=20,
             muti_mode="neighbor",
-            itera_num=num
+            #itera_num=num
         )
         gaussians.add_MultiPlane_anchor(new_xyzs=init_xyz, new_features=init_features)
     iter_start = torch.cuda.Event(enable_timing = True)
@@ -198,39 +198,25 @@ def training(dataset, opt, pipe, dataset_name, testing_iterations, saving_iterat
                 gaussians.training_statis(viewspace_point_tensor, opacity, visibility_filter, offset_selection_mask, voxel_visible_mask)
                 
                 # densification
-                # if iteration > opt.update_from and iteration % opt.update_interval == 0:
-                #     gaussians.adjust_anchor(check_interval=opt.update_interval, success_threshold=opt.success_threshold, grad_threshold=opt.densify_grad_threshold, min_opacity=opt.min_opacity)
-                #     if iteration >= 1000 and iteration <= 3000 and iteration % 1000 == 0:
-                #         gaussians.prune_point_ours_small(num=args.prune_num1, std=args.prune_std1, planer_numer=16)
-                #     elif iteration > 3000 and iteration % 2000 == 0 and iteration < opt.update_until - 2000:
-                #         gaussians.prune_point_ours_small(num=args.prune_num2, std=args.prune_std2, planer_numer=16)
-                # 修改后代码
                 if iteration > opt.update_from and iteration % opt.update_interval == 0:
-                    gaussians.adjust_anchor(
-                        check_interval=opt.update_interval, 
-                        success_threshold=opt.success_threshold, 
-                        grad_threshold=opt.densify_grad_threshold,  # 🟩 使用调整后的阈值（可能更高）
-                        min_opacity=opt.min_opacity
-                    )
-    
-                    # 🟩 更温和的剪枝策略
-                    if iteration >= 1500 and iteration <= 5000 and iteration % 1500 == 0:
+                    gaussians.adjust_anchor(check_interval=opt.update_interval, success_threshold=opt.success_threshold, grad_threshold=opt.densify_grad_threshold, min_opacity=opt.min_opacity)
+                    if iteration >= 1000 and iteration <= 3000 and iteration % 1000 == 0:
                         gaussians.prune_point_ours_small(num=args.prune_num1, std=args.prune_std1, planer_numer=16)
-                    elif iteration > 5000 and iteration % 3000 == 0 and iteration < opt.update_until - 3000:
+                    elif iteration > 3000 and iteration % 2000 == 0 and iteration < opt.update_until - 2000:
                         gaussians.prune_point_ours_small(num=args.prune_num2, std=args.prune_std2, planer_numer=16)
             elif iteration == opt.update_until:
                 del gaussians.opacity_accum
                 del gaussians.offset_gradient_accum
                 del gaussians.offset_denom
-                torch.cuda.empty_cache()      
+                torch.cuda.empty_cache()
                     
-                    # Optimizer step
+            # Optimizer step
             if iteration < opt.iterations:
-                        gaussians.optimizer.step()
-                        gaussians.optimizer.zero_grad(set_to_none = True)
+                gaussians.optimizer.step()
+                gaussians.optimizer.zero_grad(set_to_none = True)
             if (iteration in checkpoint_iterations):
-                        logger.info("\n[ITER {}] Saving Checkpoint".format(iteration))
-                        torch.save((gaussians.capture(), iteration), scene.model_path + "/chkpnt" + str(iteration) + ".pth")         
+                logger.info("\n[ITER {}] Saving Checkpoint".format(iteration))
+                torch.save((gaussians.capture(), iteration), scene.model_path + "/chkpnt" + str(iteration) + ".pth")
 
 def prepare_output_and_logger(args):    
     if not args.model_path:

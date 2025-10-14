@@ -47,7 +47,7 @@ def my_view_to_world_coord(projected_coors, K_inv, RTinv_cam1):
     return wrld_X
 
 
-def MutiPlane_anchor_init(monodepth, xyz, view_camera, plane_num=24, sample_size=10,
+def MutiPlane_anchor_init(monodepth, xyz, view_camera, plane_num=24, sample_size=20,
                           muti_mode="neighbor", itera_num=16, feat_dim=32):
     """
     基于多平面的 Anchor 初始化

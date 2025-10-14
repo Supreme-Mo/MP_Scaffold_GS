@@ -658,7 +658,14 @@ class GaussianModel:
     #     return optimizable_tensors
     def _prune_anchor_optimizer(self, mask):
         optimizable_tensors = {}
-
+        num_params = self._anchor.shape[0]
+        if mask.shape[0] != num_params:
+            print(f"[Warning] mask.shape ({mask.shape[0]}) != anchor.shape ({num_params}), correcting...")
+            if mask.shape[0] > num_params:
+                mask = mask[:num_params]
+            else:
+                pad = torch.zeros(num_params - mask.shape[0], dtype=torch.bool, device=mask.device)
+                mask = torch.cat([mask, pad], dim=0)
         for group in self.optimizer.param_groups:
             if 'mlp' in group['name'] or \
             'conv' in group['name'] or \
@@ -705,15 +712,47 @@ class GaussianModel:
         valid_points_mask = ~mask
 
         optimizable_tensors = self._prune_anchor_optimizer(valid_points_mask)
-
+        num_params = self._anchor.shape[0]
+        if mask.shape[0] != num_params:
+            print(f"[Warning] mask.shape ({mask.shape[0]}) != anchor.shape ({num_params}), correcting...")
+            if mask.shape[0] > num_params:
+                mask = mask[:num_params]
+            else:
+                pad = torch.zeros(num_params - mask.shape[0], dtype=torch.bool, device=mask.device)
+                mask = torch.cat([mask, pad], dim=0)
+        valid_points_mask = ~mask
         self._anchor = optimizable_tensors["anchor"]
         self._offset = optimizable_tensors["offset"]
         self._anchor_feat = optimizable_tensors["anchor_feat"]
         self._opacity = optimizable_tensors["opacity"]
         self._scaling = optimizable_tensors["scaling"]
         self._rotation = optimizable_tensors["rotation"]
+        # if hasattr(self, "opacity_accum") and self.opacity_accum is not None:
+        #     self.opacity_accum = self.opacity_accum[valid_points_mask]
+    # # --- anchor_demon ---
+    #     if hasattr(self, "anchor_demon") and self.anchor_demon is not None:
+    #         self.anchor_demon = self.anchor_demon[valid_points_mask]
+    #     if hasattr(self, "offset_gradient_accum") and self.offset_gradient_accum is not None and len(self.offset_gradient_accum) > 0:
+    #     # 每个 anchor 有 n_offsets 个偏移
+    #         expand_mask = valid_points_mask.repeat_interleave(self.n_offsets)
+    #         self.offset_gradient_accum = self.offset_gradient_accum[expand_mask]
+    #     if hasattr(self, "offset_denom") and self.offset_denom is not None and len(self.offset_denom) > 0:
+    #         expand_mask = valid_points_mask.repeat_interleave(self.n_offsets)
+    #         self.offset_denom = self.offset_denom[expand_mask]
+    #     torch.cuda.empty_cache()
+        expand_mask = valid_points_mask.repeat_interleave(self.n_offsets)
+        if hasattr(self, "offset_gradient_accum") and self.offset_gradient_accum is not None:
+            self.offset_gradient_accum = self.offset_gradient_accum[expand_mask]
+        if hasattr(self, "offset_denom") and self.offset_denom is not None:
+            self.offset_denom = self.offset_denom[expand_mask]
 
-        
+        if hasattr(self, "opacity_accum") and self.opacity_accum is not None:
+            self.opacity_accum = self.opacity_accum[valid_points_mask]
+        if hasattr(self, "anchor_demon") and self.anchor_demon is not None:
+            self.anchor_demon = self.anchor_demon[valid_points_mask]
+
+        self.max_radii2D = torch.zeros((self._anchor.shape[0]), device=self._anchor.device)
+
     def add_MultiPlane_anchor(self, new_xyzs, new_features=None): # 修改
         """
         为多平面初始化增加 anchor 点
@@ -960,10 +999,30 @@ class GaussianModel:
         grads[grads.isnan()] = 0.0
         grads_norm = torch.norm(grads, dim=-1)
         offset_mask = (self.offset_denom > check_interval*success_threshold*0.5).squeeze(dim=1)
-        
+        old_n = self._anchor.shape[0]
+        print("old_n:",old_n)
         self.anchor_growing(grads_norm, grad_threshold, offset_mask)
+        new_n = self._anchor.shape[0] - old_n
+        print("_anchor.shape的大小：",self._anchor.shape[0])
+        print("new_n:",new_n)
+        print("新增anchor:",new_n)
+        if new_n > 0:
+            device = self._anchor.device
+            #self.opacity_accum = torch.cat([self.opacity_accum, torch.zeros(new_n, 1, device=device)], dim=0)
+            #self.anchor_demon = torch.cat([self.anchor_demon, torch.zeros(new_n, 1, device=device)], dim=0)
+            self.offset_gradient_accum = torch.cat([self.offset_gradient_accum, torch.zeros(new_n*self.n_offsets, 1, device=device)], dim=0)
+            self.offset_denom = torch.cat([self.offset_denom, torch.zeros(new_n*self.n_offsets, 1, device=device)], dim=0)
+        #修改
         
-        # update offset_denom
+        if self._anchor.shape[0] * self.n_offsets > offset_mask.numel():
+            extra = self._anchor.shape[0]*self.n_offsets - offset_mask.numel()
+            pad_mask = torch.zeros(extra, dtype=torch.bool, device=offset_mask.device)
+            offset_mask = torch.cat([offset_mask, pad_mask], dim=0)
+        if(offset_mask.numel()==self._anchor.shape[0]):
+            print("offset_mask 已经对齐")
+        else:
+            print("还未对齐")
+        # update offset_denom   
         self.offset_denom[offset_mask] = 0
         padding_offset_demon = torch.zeros([self.get_anchor.shape[0]*self.n_offsets - self.offset_denom.shape[0], 1],
                                            dtype=torch.int32, 
@@ -977,19 +1036,29 @@ class GaussianModel:
         self.offset_gradient_accum = torch.cat([self.offset_gradient_accum, padding_offset_gradient_accum], dim=0)
         
         # # prune anchors (修改)
-        # prune_mask = (self.opacity_accum < min_opacity*self.anchor_demon).squeeze(dim=1)
+        prune_mask = (self.opacity_accum < min_opacity*self.anchor_demon).squeeze(dim=1)
         anchors_mask = (self.anchor_demon > check_interval*success_threshold).squeeze(dim=1) # [N, 1]
-        # prune_mask = torch.logical_and(prune_mask, anchors_mask) # [N] 
+        prune_mask = torch.logical_and(prune_mask, anchors_mask) # [N] 这两个不相等
         num_anchors = self._anchor.shape[0]
+        print("num_anchors...：",num_anchors)
         prune_mask_full = torch.zeros(num_anchors, dtype=torch.bool, device=self._anchor.device)
-
+        mask=prune_mask
+        if mask.shape[0] != num_anchors:
+            print(f"[Warning] input mask length ({mask.shape[0]}) != anchor ({num_anchors}), correcting...")
+            if mask.shape[0] > num_anchors:
+                mask = mask[:num_anchors]
+            else:
+                pad = torch.zeros(num_anchors - mask.shape[0], dtype=torch.bool, device=mask.device)
+                mask = torch.cat([mask, pad], dim=0)
+                print("mask 的数目",mask.numel())
+        prune_mask=mask
         # 旧 anchor 的 mask
-        old_n = min(self.opacity_accum.shape[0], num_anchors)  # 注意 safeguard
-        prune_mask_full[:old_n] = torch.logical_and(
-            (self.opacity_accum[:old_n] < min_opacity*self.anchor_demon[:old_n]).squeeze(dim=1),
-            (self.anchor_demon[:old_n] > check_interval*success_threshold).squeeze(dim=1)
-        )
-        prune_mask = prune_mask_full
+        # old_n = min(self.opacity_accum.shape[0], num_anchors)  # 注意 safeguard
+        # prune_mask_full[:old_n] = torch.logical_and(
+        #     (self.opacity_accum[:old_n] < min_opacity*self.anchor_demon[:old_n]).squeeze(dim=1),
+        #     (self.anchor_demon[:old_n] > check_interval*success_threshold).squeeze(dim=1)
+        # )
+        #prune_mask = prune_mask_full
         # update offset_denom
         offset_denom = self.offset_denom.view([-1, self.n_offsets])[~prune_mask]
         offset_denom = offset_denom.view([-1, 1])
@@ -1102,7 +1171,7 @@ class GaussianModel:
         :param std: open3d remove_statistical_outlier 的标准差倍数阈值
         :param planer_numer: 分层数量，如果为 None，则对所有 anchor 统一处理
         """
-        anchors = self._anchors  # 或 self.anchors，根据实际属性
+        anchors = self._anchor # 或 self.anchors，根据实际属性
         num_anchors = anchors.shape[0]
 
         if planer_numer is None:
@@ -1117,7 +1186,7 @@ class GaussianModel:
             mask_point_temp[ind] = True
 
             # prune_points 接受 False 表示删除
-            self.prune_points(~mask_point_temp)
+            self.prune_anchor(~mask_point_temp)
             torch.cuda.empty_cache()
 
         else:
@@ -1149,12 +1218,12 @@ class GaussianModel:
                 pcd_vector.points = o3d.utility.Vector3dVector(anchors[muti_mask].detach().cpu().numpy())
                 _, ind = pcd_vector.remove_statistical_outlier(num, std)
 
-                mask_t = torch.zeros(torch.sum(muti_mask), dtype=torch.bool, device=anchors.device)
+                mask_t = torch.zeros(torch.sum(muti_mask), dtype=torch.bool, device=anchors.device) # 这个张量应该是bool类型
                 mask_t[ind] = True
 
                 # 更新当前层 mask
                 mask_point_temp[muti_mask] = mask_t
 
             # prune_points 接受 False 表示删除
-            self.prune_points(~mask_point_temp)
+            self.prune_anchor(~mask_point_temp)
             torch.cuda.empty_cache()

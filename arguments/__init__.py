@@ -152,6 +152,19 @@ class OptimizationParams(ParamGroup):
         self.success_threshold = 0.8
         self.densify_grad_threshold = 0.0002
 
+        
+        self.muti_mode = "max"
+        self.sample_win_size = 20
+        self.reinit_camNum = 2
+        self.plane_num = 16
+        self.prune_num1 = 200
+        self.prune_std1 = 1.0
+        self.prune_num2 = 200
+        self.prune_std2 = 2.0
+        self.vial_view = []
+
+        self.win_sizes = [3, 7, 13]
+        self.sample_num = 5
         super().__init__(parser, "Optimization Parameters")
 
 def get_combined_args(parser : ArgumentParser):
