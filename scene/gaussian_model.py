@@ -710,17 +710,17 @@ class GaussianModel:
 
     def prune_anchor(self,mask):
         valid_points_mask = ~mask
-
+        print("old_valid_points_mask:", valid_points_mask.sum().item(), "/", valid_points_mask.shape[0])
         optimizable_tensors = self._prune_anchor_optimizer(valid_points_mask)
         num_params = self._anchor.shape[0]
-        if mask.shape[0] != num_params:
-            print(f"[Warning] mask.shape ({mask.shape[0]}) != anchor.shape ({num_params}), correcting...")
-            if mask.shape[0] > num_params:
-                mask = mask[:num_params]
-            else:
-                pad = torch.zeros(num_params - mask.shape[0], dtype=torch.bool, device=mask.device)
-                mask = torch.cat([mask, pad], dim=0)
-        valid_points_mask = ~mask
+        # if mask.shape[0] != num_params:
+        #     print(f"[Warning] mask.shape ({mask.shape[0]}) != anchor.shape ({num_params}), correcting...")
+        #     if mask.shape[0] > num_params:
+        #         mask = mask[:num_params]
+        #     else:
+        #         pad = torch.zeros(num_params - mask.shape[0], dtype=torch.bool, device=mask.device)
+        #         mask = torch.cat([mask, pad], dim=0)
+        # valid_points_mask = ~mask
         self._anchor = optimizable_tensors["anchor"]
         self._offset = optimizable_tensors["offset"]
         self._anchor_feat = optimizable_tensors["anchor_feat"]
@@ -740,16 +740,22 @@ class GaussianModel:
     #         expand_mask = valid_points_mask.repeat_interleave(self.n_offsets)
     #         self.offset_denom = self.offset_denom[expand_mask]
     #     torch.cuda.empty_cache()
+       
+        new_num_anchors = self._anchor.shape[0]
+        print("Prune anchors from {} to {}".format(num_params, new_num_anchors))
+        #valid_points_mask = torch.ones(new_num_anchors, dtype=torch.bool)
         expand_mask = valid_points_mask.repeat_interleave(self.n_offsets)
-        if hasattr(self, "offset_gradient_accum") and self.offset_gradient_accum is not None:
-            self.offset_gradient_accum = self.offset_gradient_accum[expand_mask]
-        if hasattr(self, "offset_denom") and self.offset_denom is not None:
-            self.offset_denom = self.offset_denom[expand_mask]
+        print("offset_gr_accum:",self.offset_gradient_accum.shape)
+        print("mask:::",valid_points_mask.shape)
+        # if hasattr(self, "offset_gradient_accum") and self.offset_gradient_accum is not None:
+        #     self.offset_gradient_accum = self.offset_gradient_accum[expand_mask]
+        # if hasattr(self, "offset_denom") and self.offset_denom is not None:
+        #     self.offset_denom = self.offset_denom[expand_mask]
+        # if hasattr(self, "opacity_accum") and self.opacity_accum is not None:
+        #     self.opacity_accum = self.opacity_accum[valid_points_mask]
+        # if hasattr(self, "anchor_demon") and self.anchor_demon is not None:
+        #     self.anchor_demon = self.anchor_demon[valid_points_mask]
 
-        if hasattr(self, "opacity_accum") and self.opacity_accum is not None:
-            self.opacity_accum = self.opacity_accum[valid_points_mask]
-        if hasattr(self, "anchor_demon") and self.anchor_demon is not None:
-            self.anchor_demon = self.anchor_demon[valid_points_mask]
 
         self.max_radii2D = torch.zeros((self._anchor.shape[0]), device=self._anchor.device)
 
@@ -1076,9 +1082,10 @@ class GaussianModel:
             self.anchor_demon[anchors_mask] = torch.zeros([anchors_mask.sum(), 1], device='cuda').float()
         
         temp_opacity_accum = self.opacity_accum[~prune_mask]
+        print("temp_opacity_accum:.................................",temp_opacity_accum.shape)
         del self.opacity_accum
         self.opacity_accum = temp_opacity_accum
-
+        print("self.opacity_accum:.................................",self.opacity_accum.shape)
         temp_anchor_demon = self.anchor_demon[~prune_mask]
         del self.anchor_demon
         self.anchor_demon = temp_anchor_demon
@@ -1223,7 +1230,29 @@ class GaussianModel:
 
                 # 更新当前层 mask
                 mask_point_temp[muti_mask] = mask_t
+# update offset_denom
+            prune_mask = ~mask_point_temp
+            print("prune_mask:",prune_mask.shape[0])
+            offset_denom = self.offset_denom.view([-1, self.n_offsets])[~prune_mask]
+            offset_denom = offset_denom.view([-1, 1])
+            del self.offset_denom
+            self.offset_denom = offset_denom
 
+            offset_gradient_accum = self.offset_gradient_accum.view([-1, self.n_offsets])[~prune_mask]
+            offset_gradient_accum = offset_gradient_accum.view([-1, 1])
+            del self.offset_gradient_accum
+            self.offset_gradient_accum = offset_gradient_accum
+            
+            # update opacity accum 
+            temp_opacity_accum = self.opacity_accum[~prune_mask]
+            print("small_temp_opacity_accum:.................................",temp_opacity_accum.shape)
+            del self.opacity_accum
+            self.opacity_accum = temp_opacity_accum
+            print("self.opacity_accum:.................................",self.opacity_accum.shape)
+            temp_anchor_demon = self.anchor_demon[~prune_mask]
+            del self.anchor_demon
+            self.anchor_demon = temp_anchor_demon
             # prune_points 接受 False 表示删除
             self.prune_anchor(~mask_point_temp)
+            print("masssss:",mask_point_temp.sum().item(), "/", mask_point_temp.shape[0])
             torch.cuda.empty_cache()
