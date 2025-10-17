@@ -90,30 +90,30 @@ def training(dataset, opt, pipe, dataset_name, testing_iterations, saving_iterat
         (model_params, first_iter) = torch.load(checkpoint)
         gaussians.restore(model_params, opt)
 #修改
-    viewpoint_stack = scene.getTrainCameras().copy()
-    resample_num = 1
-    for num in range(resample_num):
-        idx = randint(0, len(viewpoint_stack) - 1)
-        resample_cam = viewpoint_stack[idx]
+    # viewpoint_stack = scene.getTrainCameras().copy()
+    # resample_num = 1
+    # for num in range(resample_num):
+    #     idx = randint(0, len(viewpoint_stack) - 1)
+    #     resample_cam = viewpoint_stack[idx]
 
-        # 如果已经有 anchor
-        if hasattr(gaussians, "_anchor"):
-            xyz = gaussians._anchor
-        else:
-            xyz = torch.zeros((0, 3), device="cuda")
-         # 多平面生成 anchor
-        #print("....depth的形状：",resample_cam.depth.shape)
-        init_xyz, init_features = MutiPlane_anchor_init(
-            monodepth=resample_cam.depth,
-            xyz=xyz,
-            view_camera=resample_cam,
-            plane_num=16,
-            #sample_size=opt.sample_win_size,
-            sample_size=20,
-            muti_mode="neighbor",
-            #itera_num=num
-        )
-        gaussians.add_MultiPlane_anchor(new_xyzs=init_xyz, new_features=init_features)
+    #     # 如果已经有 anchor
+    #     if hasattr(gaussians, "_anchor"):
+    #         xyz = gaussians._anchor
+    #     else:
+    #         xyz = torch.zeros((0, 3), device="cuda")
+    #      # 多平面生成 anchor
+    #     #print("....depth的形状：",resample_cam.depth.shape)
+    #     init_xyz, init_features = MutiPlane_anchor_init(
+    #         monodepth=resample_cam.depth,
+    #         xyz=xyz,
+    #         view_camera=resample_cam,
+    #         plane_num=32,
+    #         #sample_size=opt.sample_win_size,
+    #         sample_size=20,
+    #         muti_mode="max",
+    #         itera_num=num
+    #     )
+    #     gaussians.add_MultiPlane_anchor(new_xyzs=init_xyz, new_features=init_features)
     iter_start = torch.cuda.Event(enable_timing = True)
     iter_end = torch.cuda.Event(enable_timing = True)
 
@@ -200,10 +200,30 @@ def training(dataset, opt, pipe, dataset_name, testing_iterations, saving_iterat
                 # densification
                 if iteration > opt.update_from and iteration % opt.update_interval == 0:
                     gaussians.adjust_anchor(check_interval=opt.update_interval, success_threshold=opt.success_threshold, grad_threshold=opt.densify_grad_threshold, min_opacity=opt.min_opacity)
-                    if iteration >= 1000 and iteration <= 3000 and iteration % 1000 == 0:
-                        gaussians.prune_point_ours_small(num=args.prune_num1, std=args.prune_std1, planer_numer=16)
-                    elif iteration > 3000 and iteration % 2000 == 0 and iteration < opt.update_until - 2000:
-                        gaussians.prune_point_ours_small(num=args.prune_num2, std=args.prune_std2, planer_numer=16)
+                    if iteration > 10000 and iteration % 2000 == 0:
+                        logger.info(f"\n[ITER {iteration}] Performing multi-plane densification based on current view.")
+                        
+                        # 使用当前帧的相机(viewpoint_cam)和深度图来添加新点
+                        # 这比随机选择一个相机更具相关性
+                        new_xyz, new_features = MutiPlane_anchor_init(
+                            monodepth=viewpoint_cam.depth,    # 使用当前视角的深度图
+                            xyz=gaussians.get_anchor,       # 使用所有现存的锚点作为参考
+                            view_camera=viewpoint_cam,      # 传入当前相机参数
+                            plane_num=4, 
+                            sample_size=4,                 # 建议减小 sample_size，避免一次加入过多点
+                            muti_mode="neighbor",
+                        )
+                        
+                        # 确保真的生成了新点再添加，防止出错
+                        if new_xyz is not None and new_xyz.shape[0] > 0:
+                           # 调用你原来的函数来添加新点和它们的优化器参数
+                           gaussians.add_MultiPlane_anchor(new_xyzs=new_xyz, new_features=new_features)
+                           # 记录一下添加了多少点，方便调试
+                           logger.info(f"Added {new_xyz.shape[0]} new points from multi-plane densification.")
+                        if iteration >= 10000 and iteration <= 30000 and iteration % 1000 == 0:
+                            gaussians.prune_point_ours_small(num=args.prune_num1, std=args.prune_std1, planer_numer=4)
+                        elif iteration >=25000 and iteration % 2000 == 0 and iteration < opt.update_until - 2000:
+                            gaussians.prune_point_ours_small(num=args.prune_num2, std=args.prune_std2, planer_numer=4)       
             elif iteration == opt.update_until:
                 del gaussians.opacity_accum
                 del gaussians.offset_gradient_accum

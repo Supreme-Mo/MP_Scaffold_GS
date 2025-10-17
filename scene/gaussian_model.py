@@ -888,7 +888,7 @@ class GaussianModel:
                 old_state = self.optimizer.state.get(param, {})
                 new_state = {}
                 for k, v in old_state.items():
-                    if isinstance(v, torch.Tensor) and v.shape[0] == param.shape[0]:
+                    if isinstance(v, torch.Tensor) and v.dim() > 0 and v.shape[0] == param.shape[0]:
                         pad = torch.zeros((new_n,) + tuple(v.shape[1:]), device=v.device, dtype=v.dtype)
                         new_state[k] = torch.cat([v, pad], dim=0)
                     else:

@@ -146,7 +146,7 @@ class OptimizationParams(ParamGroup):
         self.start_stat = 500
         self.update_from = 1500
         self.update_interval = 100
-        self.update_until = 15_000
+        self.update_until = 25000
         
         self.min_opacity = 0.005
         self.success_threshold = 0.8
@@ -158,7 +158,7 @@ class OptimizationParams(ParamGroup):
         self.reinit_camNum = 2
         self.plane_num = 16
         self.prune_num1 = 200
-        self.prune_std1 = 1.0
+        self.prune_std1 = 2.0
         self.prune_num2 = 200
         self.prune_std2 = 2.0
         self.vial_view = []
