@@ -276,7 +276,7 @@ def training(dataset, opt, pipe, dataset_name, testing_iterations, saving_iterat
                 val_cams = []
                 
                 # 视图选择 (假设 viewpoint_stack 可用)
-                for num in range(2):
+                for num in range(5):
                     idx = randint(0, len(viewpoint_stack) - 1)
                     val_cams.append(viewpoint_stack[idx])
 
@@ -325,9 +325,13 @@ def training(dataset, opt, pipe, dataset_name, testing_iterations, saving_iterat
                     
                     # 计算新的最佳位置 (xyz_vector)
                     xyz_vector = get_vector(val_cams, xyzs, max_depth, split_num=5, win_sizes=win_sizes)
-
+                    # 初始化全 False
+                    mask = torch.zeros(gaussians.get_anchor.shape[0], dtype=torch.bool, device='cuda')
+                    print("重置的 anchor 数量: ", len(decomp_mask_indices))
+                    # 将需要重置的 anchor 对应位置置为 True
+                    mask[decomp_mask_indices] = True
                     # 应用重置 (适配 Scaffold-GS: reset_anchor 替代 reset_xyz)
-                    gaussians.reset_anchor(xyz_vector, decomp_mask)
+                    gaussians.reset_anchor(xyz_vector, mask)
             if iteration < opt.iterations:
                 gaussians.optimizer.step()
                 gaussians.optimizer.zero_grad(set_to_none = True)
@@ -618,6 +622,7 @@ if __name__ == "__main__":
     parser.add_argument("--test_iterations", nargs="+", type=int, default=[30_000])
     parser.add_argument("--save_iterations", nargs="+", type=int, default=[30_000])
     parser.add_argument("--sample_iterations", nargs="+", type=int, default=[1000, 9000, 13000])
+    #args.sample_iterations = list(range(1000, 9000, 100)) + list(range(9000, 13000, 50))
     parser.add_argument("--quiet", action="store_true")
     parser.add_argument("--checkpoint_iterations", nargs="+", type=int, default=[])
     parser.add_argument("--start_checkpoint", type=str, default = None)

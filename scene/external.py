@@ -750,8 +750,8 @@ def get_vector(view_cameras, xyz, max_depth, split_num, win_sizes):
 
     # --- reference view setup ---
     view_camera = view_cameras[0]
-    temp_R = view_camera.R.detach().cpu().numpy()
-    temp_T = view_camera.T.detach().cpu().numpy()
+    temp_R = view_camera.R          # 更正bug.cpu().numpy()
+    temp_T = view_camera.T
     R = np.eye(4, dtype=np.float32)
     R[:3, :3] = temp_R.T
     R[:3, 3] = temp_T
@@ -786,8 +786,8 @@ def get_vector(view_cameras, xyz, max_depth, split_num, win_sizes):
     for inx in range(len(view_cameras) - 1):
         ref_cam = view_cameras[inx + 1]
         R_ref = np.eye(4, dtype=np.float32)
-        R_ref[:3, :3] = ref_cam.R.detach().cpu().numpy().T
-        R_ref[:3, 3] = ref_cam.T.detach().cpu().numpy()
+        R_ref[:3, :3] = ref_cam.R
+        R_ref[:3, 3] = ref_cam.T
         K_ref = np.eye(4, dtype=np.float32)
         K_ref[0, 2], K_ref[1, 2] = W / 2.0, H / 2.0
         K_ref[0, 0], K_ref[1, 1] = float(ref_cam.focal[1]), float(ref_cam.focal[0])
