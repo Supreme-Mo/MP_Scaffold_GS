@@ -43,6 +43,9 @@ from tqdm import tqdm
 from utils.image_utils import psnr
 from argparse import ArgumentParser, Namespace
 from arguments import ModelParams, PipelineParams, OptimizationParams
+#修改
+from utils.loss_utils import cos_loss, get_normal_smoothness
+from utils.image_utils import depth2normal
 
 # torch.set_num_threads(32)
 lpips_fn = lpips.LPIPS(net='vgg').to('cuda')
@@ -163,15 +166,45 @@ def training(dataset, opt, pipe, dataset_name, testing_iterations, saving_iterat
         retain_grad = (iteration < opt.update_until and iteration >= 0)
         render_pkg = render(viewpoint_cam, gaussians, pipe, background, visible_mask=voxel_visible_mask, retain_grad=retain_grad)
         
-        image, viewspace_point_tensor, visibility_filter, offset_selection_mask, radii, scaling, opacity = render_pkg["render"], render_pkg["viewspace_points"], render_pkg["visibility_filter"], render_pkg["selection_mask"], render_pkg["radii"], render_pkg["scaling"], render_pkg["neural_opacity"]
+        image, viewspace_point_tensor, visibility_filter, offset_selection_mask, radii, scaling, opacity,normal,render_depth = render_pkg["render"], render_pkg["viewspace_points"], render_pkg["visibility_filter"], render_pkg["selection_mask"], render_pkg["radii"], render_pkg["scaling"], render_pkg["neural_opacity"],render_pkg["normal"],render_pkg["depth"]
 
         gt_image = viewpoint_cam.original_image.cuda()
         Ll1 = l1_loss(image, gt_image)
 
         ssim_loss = (1.0 - ssim(image, gt_image))
         scaling_reg = scaling.prod(dim=1).mean()
-        loss = (1.0 - opt.lambda_dssim) * Ll1 + opt.lambda_dssim * ssim_loss + 0.01*scaling_reg
+        #修改
+        losses = {}
+        losses['image'] = Ll1
+        losses['ssim'] = ssim_loss
+        losses['scale'] = scaling_reg * 0.01
+        if normal is not None and render_depth is not None:
+            # 只在可见点计算法线损失
+            opac = render_pkg["opac"]
+            mask_vis = (opac.detach() > 1e-5)
+            
+            d2n = depth2normal(render_depth, mask_vis, viewpoint_cam)
 
+            # 前期权重大，后期权重小
+            if iteration < 3000:
+                lambda_normal = 0.01
+                lambda_normal_local = 0.001
+            else:
+                lambda_normal = 0.0001
+                lambda_normal_local = 0.0001
+
+            losses['normal'] = cos_loss(d2n, normal)
+            losses['local_normal'] = get_normal_smoothness(normal, gt_image, k_size=3)
+        loss_weights = {
+            "image": 1.0 - opt.lambda_dssim,  # 这里就体现了原公式的权重
+            "ssim": opt.lambda_dssim,
+            "scale": 0.01,
+            "normal": lambda_normal if 'normal' in losses else 0.0,
+            "local_normal": lambda_normal_local if 'local_normal' in losses else 0.0
+                        }   
+        #修改
+        #loss = (1.0 - opt.lambda_dssim) * Ll1 + opt.lambda_dssim * ssim_loss + 0.01*scaling_reg
+        loss = sum([loss_weights[k] * v for k, v in losses.items()])
         #loss.backward()
         loss.backward(retain_graph=retain_grad)
         iter_end.record()
@@ -185,7 +218,10 @@ def training(dataset, opt, pipe, dataset_name, testing_iterations, saving_iterat
                 progress_bar.update(10)
             if iteration == opt.iterations:
                 progress_bar.close()
-
+            train_psnr = psnr(image, gt_image).mean().item()
+            #修改
+            if tb_writer:
+                tb_writer.add_scalar(f'{dataset_name}/train_psnr', train_psnr, iteration)
             # Log and save
             training_report(tb_writer, dataset_name, iteration, Ll1, loss, l1_loss, iter_start.elapsed_time(iter_end), testing_iterations, scene, render, (pipe, background), wandb, logger)
             if (iteration in saving_iterations):
@@ -210,7 +246,7 @@ def training(dataset, opt, pipe, dataset_name, testing_iterations, saving_iterat
                             xyz=gaussians.get_anchor,       # 使用所有现存的锚点作为参考
                             view_camera=viewpoint_cam,      # 传入当前相机参数
                             plane_num=4, 
-                            sample_size=4,                 # 建议减小 sample_size，避免一次加入过多点
+                            sample_size=8,                 # 建议减小 sample_size，避免一次加入过多点
                             muti_mode="neighbor",
                         )
                         

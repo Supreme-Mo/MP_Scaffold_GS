@@ -44,7 +44,9 @@ class Camera(nn.Module):
             self.original_image *= gt_alpha_mask.to(self.data_device)
         else:
             self.original_image *= torch.ones((1, self.image_height, self.image_width), device=self.data_device)
-
+        #修改
+        prcppoint = np.array([focal[2] / self.image_width, focal[3] / self.image_height])
+        self.prcppoint = torch.tensor(prcppoint).to(torch.float32)  # .cuda()
         self.zfar = 100.0
         self.znear = 0.01
 

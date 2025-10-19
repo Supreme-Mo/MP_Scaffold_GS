@@ -61,4 +61,48 @@ def _ssim(img1, img2, window, window_size, channel, size_average=True):
         return ssim_map.mean()
     else:
         return ssim_map.mean(1).mean(1).mean(1)
+# 修改
+def cos_loss(output, gt):
 
+    dot = torch.sum(output * gt, dim=(0))
+    norm_A = torch.linalg.norm(output, dim=(0))
+    norm_B = torch.linalg.norm(gt, dim=(0))
+    cos_sim = dot / (norm_A * norm_B+1e-8)
+
+    return 1-torch.mean(cos_sim)
+
+def gradient_x(img,gri_s):
+    return img[:, :, :-gri_s] - img[:, :, gri_s:]
+
+def gradient_y(img,gri_s):
+    return img[:, :-gri_s] - img[:, gri_s:]
+
+def get_normal_smoothness(depth, img,k_size=5):
+    _,H,W = img.shape
+
+    img_gradients_x = gradient_x(img,gri_s=int(k_size/2))
+    img_gradients_y = gradient_y(img,gri_s=int(k_size/2))
+    if k_size == 5:
+        img_gradients_x = F.pad(img_gradients_x, (1,1, 0, 0))
+        img_gradients_y = F.pad(img_gradients_y, (0, 0, 1,1))
+    elif k_size == 3:
+        img_gradients_x = F.pad(img_gradients_x, (0, 1, 0, 0))
+        img_gradients_y = F.pad(img_gradients_y, (0, 0, 0, 1))
+
+    gradient_weight = 0.5*img_gradients_y+0.5*img_gradients_x
+
+    gradient_weight = torch.exp(-torch.mean(torch.abs(gradient_weight),dim=0,keepdim=True))
+    gradient_weight = F.pad(gradient_weight, (0, H%k_size, 0, 0))
+    gradient_weight = F.pad(gradient_weight, (0, 0, 0, W%k_size))
+
+    # print(gradient_weight.shape)
+    gradient_chunks = F.unfold(gradient_weight.unsqueeze(0), kernel_size=(k_size, k_size), stride=k_size) #(1,9,size)
+    gradient_chunks = torch.mean(gradient_chunks,dim=1,keepdim=True)
+
+    depth = F.pad(depth, (0, H%k_size, 0, 0))
+    depth = F.pad(depth, (0, 0, 0, W%k_size))
+
+    depth_chunks = F.unfold(depth.unsqueeze(0), kernel_size=(k_size, k_size), stride=k_size) #(1,9,size)
+    depth_var = torch.var(depth_chunks,dim=1,keepdim=True) # (1,1,size)
+
+    return torch.mean(gradient_chunks*depth_var)

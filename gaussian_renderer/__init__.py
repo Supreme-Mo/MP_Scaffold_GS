@@ -12,7 +12,8 @@ import torch
 from einops import repeat
 
 import math
-from diff_gaussian_rasterization import GaussianRasterizationSettings, GaussianRasterizer
+#from diff_gaussian_rasterization import GaussianRasterizationSettings, GaussianRasterizer
+from diff_gauss import GaussianRasterizationSettings, GaussianRasterizer
 from scene.gaussian_model import GaussianModel
 
 def generate_neural_gaussians(viewpoint_camera, pc : GaussianModel, visible_mask=None, is_training=False):
@@ -155,26 +156,49 @@ def render(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Tensor, 
     rasterizer = GaussianRasterizer(raster_settings=raster_settings)
     
     # Rasterize visible Gaussians to image, obtain their radii (on screen). 
-    rendered_image, radii = rasterizer(
-        means3D = xyz,
-        means2D = screenspace_points,
-        shs = None,
-        colors_precomp = color,
-        opacities = opacity,
-        scales = scaling,
-        rotations = rot,
-        cov3D_precomp = None)
+    # rendered_image, radii = rasterizer(
+    #     means3D = xyz,
+    #     means2D = screenspace_points,
+    #     shs = None,
+    #     colors_precomp = color,
+    #     opacities = opacity,
+    #     scales = scaling,
+    #     rotations = rot,
+    #     cov3D_precomp = None)
+    rendered_image, rendered_depth, rendered_norm, rendered_alpha, radii, extra = rasterizer(
+    means3D=xyz,
+    means2D=screenspace_points,
+    shs=None,
+    colors_precomp=color,
+    opacities=opacity,
+    scales=scaling,
+    rotations=rot,
+    cov3Ds_precomp=None,
+    extra_attrs=None  # 可留空或传入 per-Gaussian 属性
+)
     
     # Those Gaussians that were frustum culled or had a radius of 0 were not visible.
     if is_training:
-        return {"render": rendered_image,
-                "viewspace_points": screenspace_points,
-                "visibility_filter" : radii > 0,
-                "radii": radii,
-                "selection_mask": mask,
-                "neural_opacity": neural_opacity,
-                "scaling": scaling,
-                }
+        # return {"render": rendered_image,
+        #         "viewspace_points": screenspace_points,
+        #         "visibility_filter" : radii > 0,
+        #         "radii": radii,
+        #         "selection_mask": mask,
+        #         "neural_opacity": neural_opacity,
+        #         "scaling": scaling,
+        #       }
+         return {   "render": rendered_image,
+                    "viewspace_points": screenspace_points,
+                    "visibility_filter" : radii > 0,
+                    "radii": radii,
+                    "selection_mask": mask,
+                    "neural_opacity": neural_opacity,
+                    "scaling": scaling,
+                    "depth": rendered_depth,
+                    "normal": rendered_norm,
+                    "alpha": rendered_alpha,
+                    "opac":rendered_alpha
+                    }
     else:
         return {"render": rendered_image,
                 "viewspace_points": screenspace_points,
