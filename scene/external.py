@@ -407,8 +407,20 @@ def error_map(render_image,gt_image,static_factor):
 
 
 
-def get_add_point(view_camera,xyz,our_mask): #,index,mask_t
-
+def get_add_point(view_camera, anchor_xyz: torch.Tensor, our_mask: np.ndarray):
+    """
+    功能：找出 Scaffold-GS 的 3D 锚点中，哪些点投影到了当前视图的 2D 误差区域 (our_mask)。
+    
+    Args:
+        view_camera: 当前视图的相机参数对象。
+        anchor_xyz (torch.Tensor): Scaffold-GS 的锚点坐标 (N, 3)，即 gaussians.get_anchor。
+        our_mask (np.ndarray): 当前视图的 2D 误差掩码 (H, W)，值 1 表示误差。
+        
+    Returns:
+        np.ndarray: 一个 (N,) 数组，1 表示该锚点被误差区域覆盖，0 否则。
+    """
+    
+    # 1. 准备 世界到相机坐标系 (R) 和 相机内参 (K) 矩阵
     temp_R = copy.deepcopy(view_camera.R)
     temp_T = copy.deepcopy(view_camera.T)
 
@@ -417,81 +429,68 @@ def get_add_point(view_camera,xyz,our_mask): #,index,mask_t
     R[:3, :3] = temp_R
     R[:3, 3] = temp_T
 
-
     H, W = view_camera.original_image.shape[1], view_camera.original_image.shape[2]
-    # print(H,W)
     K = np.eye(4)
-    K[0, 2] = view_camera.focal[2]
-    K[1, 2] = view_camera.focal[3]
-    K[0, 0] = view_camera.focal[1]
-    K[1, 1] = view_camera.focal[0]
-    # print(view_camera.focal)
-    # print(K)
+    K[0, 2] = view_camera.focal[2] # Cx
+    K[1, 2] = view_camera.focal[3] # Cy
+    K[0, 0] = view_camera.focal[1] # Fx
+    K[1, 1] = view_camera.focal[0] # Fy
 
     K = torch.FloatTensor(K).unsqueeze(0).cuda()
     R = torch.FloatTensor(R).unsqueeze(0).cuda()
 
-    src_xyz_t = xyz
-    src_xyz_t = src_xyz_t.unsqueeze(0).permute(0, 2, 1)
+    # 2. 将 3D 锚点坐标转换为齐次坐标 (N, 4) 并投影
+    src_xyz_t = anchor_xyz # 使用传入的锚点坐标
+    src_xyz_t = src_xyz_t.unsqueeze(0).permute(0, 2, 1) # (1, 3, N)
     tempdata = torch.ones((src_xyz_t.shape[0], 1, src_xyz_t.shape[2])).cuda()
-    src_xyz = torch.cat((src_xyz_t, tempdata), dim=1)
+    src_xyz = torch.cat((src_xyz_t, tempdata), dim=1) # (1, 4, N)
 
+    # 假设 world_to_view_screen(src_xyz, R, K) 执行了 K * R * P_world
     xyz_sampler = world_to_view_screen(src_xyz, RT_cam2=R, K=K)
 
+    # 3. 提取 2D 像素坐标
+    sampler = xyz_sampler[0, 0:2].transpose(1, 0) # 2D 像素坐标 (u, v), 形状 (N, 2)
+    # depth_sampler = xyz_sampler[0, 2:].transpose(1, 0) # 深度 Z，在本函数中未使用
 
-
-    sampler = xyz_sampler[0, 0:2].transpose(1, 0)
-
-    depth_sampler = xyz_sampler[0, 2:].transpose(1, 0)
-
-
+    # 4. 边界检查和钳制
     sampler_t = sampler.detach().cpu().numpy().astype(int)
-    sampler_mask = np.ones((sampler_t.shape[0],1))
-
-    sampler_mask[sampler_t[:, 1] >= H] = 0
-    sampler_mask[sampler_t[:, 0] >= W] = 0
-    sampler_mask[sampler_t[:, 1] < 0] = 0
-    sampler_mask[sampler_t[:, 0] < 0] = 0
-
-
+    
+    # ... (原代码中冗余的边界检查/mask部分，因为在下一步的索引钳制中已经处理)
+    # 简化：直接对坐标进行钳制
     sampler_t[sampler_t[:, 1] >= H, 1] = H - 1
     sampler_t[sampler_t[:, 0] >= W, 0] = W - 1
-    sampler_t[sampler_t<0] = 0
+    sampler_t[sampler_t < 0] = 0
+    # 必须排除投影到边界外的点，以避免索引错误
 
+    # 5. 建立 2D 像素与 3D 锚点索引的映射
+    sampler_index = np.arange(sampler_t.shape[0]) # 3D 锚点的原始索引 [0, 1, 2, ..., N-1]
 
-
-    sampler_k = np.zeros_like(sampler_t)
-    sampler_k[:,0] = sampler_t[:,1]
-    sampler_k[:,1] = sampler_t[:,0]
-
-
-    sampler_index = [i for i in range(sampler_t.shape[0])]
-
-    mask = np.zeros((H,W))
-    mask[sampler_t[:,1],sampler_t[:,0]] = sampler_index
+    mask = np.zeros((H,W), dtype=np.int32)
+    # 将每个锚点投影到的像素位置的值设置为该锚点的原始索引
+    mask[sampler_t[:,1],sampler_t[:,0]] = sampler_index 
+    
+    # 创建一个 2D 布尔掩码，标记哪些像素有投影点
     mask_temp = np.zeros((H,W))
-
     mask_temp[mask!=0] = 1
 
+    # 6. 结合外部误差掩码 (our_mask) 进行过滤
+    # 只有 '有投影点' (1) 且 '在误差区域' (1) 的像素，相加才等于 2
+    mask_temp += our_mask
+    mask[mask_temp!=2] = 0 # 仅保留满足条件的像素上的锚点索引
 
-    # print(our_mask.max(),our_mask.min())
-    # return mask_temp*255  # mask
-
-    mask_temp +=our_mask
-    mask[mask_temp!=2] = 0
-
+    # 7. 提取最终的锚点索引
     flatten_mask = mask.flatten()
     list_mask = flatten_mask.tolist()
-
+    
+    # 排除索引 0 (0 代表没有锚点投影或不在误差区域)
     set_data = set(list_mask)
-    # print(len(set_data))
-    select_data = list(set_data)[1:]
+    select_data = list(set_data)[1:] 
 
-
-    Gaussian_mask= np.zeros((xyz.shape[0]))
+    # 8. 生成输出的 1D 锚点掩码
+    Gaussian_mask= np.zeros((anchor_xyz.shape[0]))
     Gaussian_mask[np.array(select_data,dtype=int)] = 1
 
-    return Gaussian_mask #mask
+    return Gaussian_mask
 
 def compute_conv3d(conv3d):
     # print("conv3d",conv3d.shape)
@@ -733,100 +732,105 @@ def gaussian_decomp(gaussians, viewpoint_camera, input_mask, indices_mask):
 
 
 
-def get_vector(view_cameras,xyz,max_depth,split_num,win_sizes):
+# 修改
+def get_vector(view_cameras, xyz, max_depth, split_num, win_sizes):
+    """
+    Multi-view anchor relocation for Scaffold-GS.
+    Given a list of view_cameras and 3D anchors (N,3), find optimal positions
+    by evaluating cross-view SSIM/HSV consistency along depth direction.
+    Returns: sampler_xyz [N,3] in world coordinates.
+    """
+
+    # --- device & tensor setup ---
+    if isinstance(xyz, np.ndarray):
+        xyz = torch.from_numpy(xyz).float()
+    device = xyz.device if isinstance(xyz, torch.Tensor) else torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    xyz = xyz.to(device=device, dtype=torch.float32)
+    assert len(view_cameras) >= 1 and xyz.ndim == 2 and xyz.shape[1] == 3
+
+    # --- reference view setup ---
     view_camera = view_cameras[0]
-    temp_R = copy.deepcopy(view_camera.R)
-    temp_T = copy.deepcopy(view_camera.T)
-
-    temp_R = np.transpose(temp_R)
-    R = np.eye(4)
-    R[:3, :3] = temp_R
+    temp_R = view_camera.R.detach().cpu().numpy()
+    temp_T = view_camera.T.detach().cpu().numpy()
+    R = np.eye(4, dtype=np.float32)
+    R[:3, :3] = temp_R.T
     R[:3, 3] = temp_T
-    H, W = view_camera.original_image.shape[1], view_camera.original_image.shape[2]
-    K = torch.eye(4)
+    H, W = int(view_camera.original_image.shape[1]), int(view_camera.original_image.shape[2])
+    K = np.eye(4, dtype=np.float32)
+    K[0, 2], K[1, 2] = W / 2.0, H / 2.0
+    K[0, 0], K[1, 1] = float(view_camera.focal[1]), float(view_camera.focal[0])
+    K = torch.from_numpy(K).unsqueeze(0).to(device)
+    R = torch.from_numpy(R).unsqueeze(0).to(device)
 
-    K[0, 2] = W/2
-    K[1, 2] = H/2
-    K[0, 0] = view_camera.focal[1]
-    K[1, 1] = view_camera.focal[0]
-
-    K = torch.FloatTensor(K).unsqueeze(0).cuda()
-    R = torch.FloatTensor(R).unsqueeze(0).cuda()
-
-
+    # --- homogeneous xyz ---
     src_xyz_t = xyz.unsqueeze(0).permute(0, 2, 1)
-    tempdata = torch.ones((src_xyz_t.shape[0], 1, src_xyz_t.shape[2])).cuda()
-    src_xyz = torch.cat((src_xyz_t, tempdata), dim=1)
+    ones = torch.ones((1, 1, xyz.shape[0]), device=device)
+    src_xyz_h = torch.cat((src_xyz_t, ones), dim=1)
 
-    xyz_sampler = world_to_view_screen(src_xyz, RT_cam2=R, K=K)
+    # --- projection & depth setup ---
+    xyz_sampler = world_to_view_screen(src_xyz_h, RT_cam2=R, K=K)
     sampler = xyz_sampler[0, 0:2].transpose(1, 0)
-    depth = xyz_sampler[0,2:3]
-
     R_invs = torch.inverse(R)
     K_invs = torch.inverse(K)
+    pts3D = torch.ones((1, 4, xyz_sampler.shape[2]), device=device)
+    pts3D[:, 2:3, :] = float(max_depth)
+    pts3D[:, 0:2, :] = xyz_sampler[:, 0:2, :] * float(max_depth)
+    points_world = my_view_to_world_coord(pts3D, K_invs, R_invs)
+    depth_vector = (points_world - src_xyz_h) / float(split_num)
 
-    pts3D = torch.ones((1,4,xyz_sampler.shape[2]),device="cuda")
-    pts3D[:, 2:3, :] = max_depth
-    pts3D[:,0:2,:] = xyz_sampler[:,0:2,:] * max_depth
-    points = my_view_to_world_coord(pts3D, K_invs, R_invs)
-    depth_vector = (points-src_xyz)/split_num
+    # --- multi-view score accumulation ---
+    hsv_weight = torch.tensor([0.2, 0.3, 0.5], device=device)
+    scale_weight = torch.tensor([0.4, 0.3, 0.3], device=device)
+    all_muti_score = None
 
-    all_muti_score = 0
+    for inx in range(len(view_cameras) - 1):
+        ref_cam = view_cameras[inx + 1]
+        R_ref = np.eye(4, dtype=np.float32)
+        R_ref[:3, :3] = ref_cam.R.detach().cpu().numpy().T
+        R_ref[:3, 3] = ref_cam.T.detach().cpu().numpy()
+        K_ref = np.eye(4, dtype=np.float32)
+        K_ref[0, 2], K_ref[1, 2] = W / 2.0, H / 2.0
+        K_ref[0, 0], K_ref[1, 1] = float(ref_cam.focal[1]), float(ref_cam.focal[0])
+        K_ref = torch.from_numpy(K_ref).unsqueeze(0).to(device)
+        R_ref = torch.from_numpy(R_ref).unsqueeze(0).to(device)
 
-    for inx in range(len(view_cameras)-1):
-        view_camera_ref = view_cameras[inx+1]
-        temp_R_ref = copy.deepcopy(view_camera_ref.R)
-        temp_T_ref = copy.deepcopy(view_camera_ref.T)
-
-        temp_R_ref = np.transpose(temp_R_ref)
-        R_ref = np.eye(4)
-        R_ref[:3, :3] = temp_R_ref
-        R_ref[:3, 3] = temp_T_ref
-        K_ref = torch.eye(4)
-
-        K_ref[0, 2] = W / 2
-        K_ref[1, 2] = H / 2
-        K_ref[0, 0] = view_camera_ref.focal[1]
-        K_ref[1, 1] = view_camera_ref.focal[0]
-
-        K_ref = torch.FloatTensor(K_ref).unsqueeze(0).cuda()
-        R_ref = torch.FloatTensor(R_ref).unsqueeze(0).cuda()
-
+        # --- depth sampling ---
         sampler_refs = []
-        for i in range(split_num+1):
-            xyz_sampler = src_xyz + i*depth_vector
-            xyz_sampler_ref = world_to_view_screen(xyz_sampler, RT_cam2=R_ref, K=K_ref)
+        for i in range(split_num + 1):
+            xyz_sample_h = src_xyz_h + float(i) * depth_vector
+            xyz_sampler_ref = world_to_view_screen(xyz_sample_h, RT_cam2=R_ref, K=K_ref)
             sampler_ref = xyz_sampler_ref[0, 0:2].transpose(1, 0)
             sampler_refs.append(sampler_ref)
 
-        hsv_weight = torch.tensor([0.2,0.3,0.5],device="cuda")
-        muti_score = []
-
+        # --- compute multi-scale scores ---
+        muti_score_per_ref = []
         for win_size in win_sizes:
-            stable_scale = caculat_muti_scale_SSIM(view_camera,sampler,win_size=win_size)
+            stable_scale = caculat_muti_scale_SSIM(view_camera, sampler, win_size=win_size)
             scores = []
-            for num in range(split_num+1):
-                ref_scale = caculat_muti_scale_SSIM(view_camera_ref, sampler_refs[num], win_size=win_size)
+            for num in range(split_num + 1):
+                ref_scale = caculat_muti_scale_SSIM(ref_cam, sampler_refs[num], win_size=win_size)
                 if win_size == 1:
-                    score = torch.sum((ref_scale-stable_scale)*hsv_weight,dim=1)
+                    score = torch.sum(torch.abs(ref_scale - stable_scale) * hsv_weight.unsqueeze(0), dim=1)
                 else:
-                    score = 1-ssim(ref_scale,stable_scale,window_size=win_size,size_average=False)
+                    score = 1.0 - ssim(ref_scale, stable_scale, window_size=win_size, size_average=False)
+                    score = torch.clamp(score, 0.0, 1.0)
                 scores.append(score.unsqueeze(1))
-            scores = torch.cat(scores,dim=1)
-            muti_score.append(scores.unsqueeze(2))
-        muti_score = torch.cat(muti_score,dim=2)
-        scale_weight = torch.tensor([0.4, 0.3, 0.3], device="cuda")
-        muti_score = torch.sum(muti_score*scale_weight.unsqueeze(0).unsqueeze(0),dim=2)
-        all_muti_score += muti_score
+            scores = torch.cat(scores, dim=1)
+            muti_score_per_ref.append(scores.unsqueeze(2))
+        muti_score_per_ref = torch.cat(muti_score_per_ref, dim=2)
+        muti_score_per_ref = torch.sum(muti_score_per_ref * scale_weight.view(1, 1, -1), dim=2)
 
+        all_muti_score = muti_score_per_ref if all_muti_score is None else (all_muti_score + muti_score_per_ref)
+
+    # --- final selection ---
+    all_muti_score = all_muti_score + 1e-6 * torch.randn_like(all_muti_score)
     _, sample_index = torch.min(all_muti_score, dim=1)
-
-    scale_lins = torch.linspace(0,split_num,split_num+1,device="cuda")
-    sampler_xyz = src_xyz + scale_lins[sample_index]* depth_vector
-    sampler_xyz = sampler_xyz[0,:-1].transpose(1,0)
+    scale_lins = torch.linspace(0, split_num, split_num + 1, device=device)
+    chosen_scales = scale_lins[sample_index].view(1, 1, -1)
+    sampler_xyz_h = src_xyz_h + chosen_scales * depth_vector
+    sampler_xyz = sampler_xyz_h[0, :3, :].transpose(1, 0).contiguous()
 
     return sampler_xyz
-
 def caculat_muti_scale_SSIM(view_camera, sampler_t, win_size):
     image = view_camera.original_image
     H, W = image.shape[1], image.shape[2]

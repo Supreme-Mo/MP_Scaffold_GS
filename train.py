@@ -8,7 +8,7 @@
 #
 # For inquiries contact  george.drettakis@inria.fr
 #
-
+import cv2
 import os
 import numpy as np
 
@@ -267,6 +267,67 @@ def training(dataset, opt, pipe, dataset_name, testing_iterations, saving_iterat
                 torch.cuda.empty_cache()
                     
             # Optimizer step
+            if iteration in args.sample_iterations:
+                print("resample !!  ", iteration)
+                
+                # 1. 初始化 Gaussian_mask (适配 Scaffold-GS: get_anchor 替代 get_xyz)
+                Gaussian_mask = np.zeros(gaussians.get_anchor.shape[0])
+                masks = []
+                val_cams = []
+                
+                # 视图选择 (假设 viewpoint_stack 可用)
+                for num in range(2):
+                    idx = randint(0, len(viewpoint_stack) - 1)
+                    val_cams.append(viewpoint_stack[idx])
+
+                # 2. 渲染、误差计算和累积
+                for index, viewpoint_cam in enumerate(val_cams):
+                    # ⚠️ 注意: 在 Scaffold-GS 中, render 调用前通常需要 prefilter_voxel 步骤, 此处保留原函数调用。
+                    render_pkg = render(viewpoint_cam, gaussians, pipe, background)
+                    image = render_pkg["render"]
+                    render_depth = render_pkg["depth"]
+
+                    # 深度图预处理
+                    mono_depth = viewpoint_cam.depth
+                    if mono_depth.shape != render_depth.shape:
+                        # 假设 cv2 已导入
+                        mono_depth = cv2.resize(mono_depth, [render_depth.shape[2], render_depth.shape[1]])
+
+                    # 结合深度误差和图像误差
+                    mask = get_depth_mask(render_depth.detach().cpu().numpy()[0], mono_depth)
+                    error_mask = error_map(image, viewpoint_cam.original_image, static_factor=0.2)
+                    mask[error_mask.detach().cpu().numpy() != 0] = 1
+                    masks.append(mask)
+                    
+                    # 累积多视图误差 (适配 Scaffold-GS: get_anchor 替代 get_xyz)
+                    Gaussian_mask_t = get_add_point(viewpoint_cam, gaussians.get_anchor, mask)
+                    Gaussian_mask = Gaussian_mask + Gaussian_mask_t
+
+                # 3. 确定需要重置位置的 Anchor 索引
+                # 仅保留在至少两次视图中被标记为错误的 Anchor 
+                Gaussian_mask[Gaussian_mask < 2] = 0
+                
+                # 提取索引 (NumPy 数组)
+                decomp_mask_indices = np.where(Gaussian_mask != 0)[0]
+                
+                if len(decomp_mask_indices) > 0:
+                    # 转换为 PyTorch 索引张量
+                    decomp_mask = torch.tensor(decomp_mask_indices, dtype=torch.long, device='cuda')
+                    
+                    # --- 移除复杂的分裂/克隆循环 ---
+                    # for i, view in enumerate(val_cams): ... gaussian_decomp(...) (此步骤被移除)
+
+                    # 4. Anchor 位置重置 (Repositioning)
+                    # 获取需要重置的 Anchor 坐标 (适配 Scaffold-GS: get_anchor 替代 get_xyz)
+                    xyzs = gaussians.get_anchor[decomp_mask] 
+                    max_depth = gaussians.get_anchor.max() * 0.95
+                    win_sizes = [1, 7, 21]
+                    
+                    # 计算新的最佳位置 (xyz_vector)
+                    xyz_vector = get_vector(val_cams, xyzs, max_depth, split_num=5, win_sizes=win_sizes)
+
+                    # 应用重置 (适配 Scaffold-GS: reset_anchor 替代 reset_xyz)
+                    gaussians.reset_anchor(xyz_vector, decomp_mask)
             if iteration < opt.iterations:
                 gaussians.optimizer.step()
                 gaussians.optimizer.zero_grad(set_to_none = True)
@@ -556,6 +617,7 @@ if __name__ == "__main__":
     # parser.add_argument("--save_iterations", nargs="+", type=int, default=[3_000, 7_000, 30_000])
     parser.add_argument("--test_iterations", nargs="+", type=int, default=[30_000])
     parser.add_argument("--save_iterations", nargs="+", type=int, default=[30_000])
+    parser.add_argument("--sample_iterations", nargs="+", type=int, default=[1000, 9000, 13000])
     parser.add_argument("--quiet", action="store_true")
     parser.add_argument("--checkpoint_iterations", nargs="+", type=int, default=[])
     parser.add_argument("--start_checkpoint", type=str, default = None)

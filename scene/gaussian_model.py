@@ -1256,3 +1256,42 @@ class GaussianModel:
             self.prune_anchor(~mask_point_temp)
             print("masssss:",mask_point_temp.sum().item(), "/", mask_point_temp.shape[0])
             torch.cuda.empty_cache()
+# 修改
+def reset_anchor(self, new_xyz, mask):
+    """
+    Reset the positions of selected anchors in Scaffold-GS.
+    
+    Args:
+        new_xyz (torch.Tensor): 新的 anchor 坐标 [N,3]，对应 mask 为 True 的部分。
+        mask (torch.BoolTensor): 长度为 self._anchor.shape[0] 的布尔 mask，True 表示需要重置的 anchor。
+    """
+    # --- 检查 mask 长度 ---
+    num_anchor = self._anchor.shape[0]
+    if mask.shape[0] != num_anchor:
+        raise ValueError(f"mask length {mask.shape[0]} != number of anchors {num_anchor}")
+
+    # --- 构造新的 anchor parameter ---
+    updated_anchor = self._anchor.clone()
+    updated_anchor[mask] = new_xyz
+    updated_anchor = nn.Parameter(updated_anchor.contiguous().requires_grad_(True))
+
+    # --- 替换原 anchor ---
+    self._anchor = updated_anchor
+
+    # --- 如果 optimizer 已经存在，需要同步更新 optimizer 中的 anchor 参数 ---
+    for group in self.optimizer.param_groups:
+        if group['name'] == 'anchor':
+            old_param = group['params'][0]
+            group['params'][0] = self._anchor
+            # 保留原有 state 中的对应元素
+            old_state = self.optimizer.state.get(old_param, None)
+            if old_state is not None:
+                new_state = {}
+                for k, v in old_state.items():
+                    if isinstance(v, torch.Tensor) and v.shape[0] == old_param.shape[0]:
+                        new_state[k] = v.clone()[mask].detach().to(self._anchor.device)
+                    else:
+                        new_state[k] = v
+                del self.optimizer.state[old_param]
+                self.optimizer.state[self._anchor] = new_state
+            break
