@@ -245,7 +245,7 @@ def training(dataset, opt, pipe, dataset_name, testing_iterations, saving_iterat
                             monodepth=viewpoint_cam.depth,    # 使用当前视角的深度图
                             xyz=gaussians.get_anchor,       # 使用所有现存的锚点作为参考
                             view_camera=viewpoint_cam,      # 传入当前相机参数
-                            plane_num=4, 
+                            plane_num=3, 
                             sample_size=8,                 # 建议减小 sample_size，避免一次加入过多点
                             muti_mode="neighbor",
                         )
@@ -256,10 +256,15 @@ def training(dataset, opt, pipe, dataset_name, testing_iterations, saving_iterat
                            gaussians.add_MultiPlane_anchor(new_xyzs=new_xyz, new_features=new_features)
                            # 记录一下添加了多少点，方便调试
                            logger.info(f"Added {new_xyz.shape[0]} new points from multi-plane densification.")
-                        if iteration >= 10000 and iteration <= 30000 and iteration % 1000 == 0:
+                        visibility_filter = render_pkg["visibility_filter"]
+                        visible_ratio = visibility_filter.sum().item() / visibility_filter.numel()
+                        print("visible_ratio--------------------------------触发",visible_ratio)
+                       # if iteration > 12000 and visible_ratio < 0.6: # 通过可见性触发,尝试解决剪枝过快的问题
+                            #print("visible_ratio--------------------------------触发",visible_ratio)
+                        if iteration >= 10000 and iteration <= 25000 and iteration % 1000 == 0:
                             gaussians.prune_point_ours_small(num=args.prune_num1, std=args.prune_std1, planer_numer=4)
-                        elif iteration >=25000 and iteration % 2000 == 0 and iteration < opt.update_until - 2000:
-                            gaussians.prune_point_ours_small(num=args.prune_num2, std=args.prune_std2, planer_numer=4)       
+                        # elif iteration >=25000 and iteration % 1000 == 0 and iteration < opt.update_until - 2000:
+                        #     gaussians.prune_point_ours_small(num=args.prune_num2, std=args.prune_std2, planer_numer=4)       
             elif iteration == opt.update_until:
                 del gaussians.opacity_accum
                 del gaussians.offset_gradient_accum
@@ -276,10 +281,13 @@ def training(dataset, opt, pipe, dataset_name, testing_iterations, saving_iterat
                 val_cams = []
                 
                 # 视图选择 (假设 viewpoint_stack 可用)
-                for num in range(5):
-                    idx = randint(0, len(viewpoint_stack) - 1)
-                    val_cams.append(viewpoint_stack[idx])
-
+                # 这是旧的版本获取视角
+                # for num in range(5):
+                #     idx = randint(0, len(viewpoint_stack) - 1)
+                #     val_cams.append(viewpoint_stack[idx])
+                #  new Version 获取视角 # 提升Gaussian_mask的稳定性
+                train_cams = scene.getTrainCameras()
+                val_cams = [train_cams[randint(0, len(train_cams)-1)] for _ in range(5)] 
                 # 2. 渲染、误差计算和累积
                 for index, viewpoint_cam in enumerate(val_cams):
                     # ⚠️ 注意: 在 Scaffold-GS 中, render 调用前通常需要 prefilter_voxel 步骤, 此处保留原函数调用。
@@ -621,11 +629,18 @@ if __name__ == "__main__":
     # parser.add_argument("--save_iterations", nargs="+", type=int, default=[3_000, 7_000, 30_000])
     parser.add_argument("--test_iterations", nargs="+", type=int, default=[30_000])
     parser.add_argument("--save_iterations", nargs="+", type=int, default=[30_000])
-    parser.add_argument("--sample_iterations", nargs="+", type=int, default=[1000, 9000, 13000])
+   # parser.add_argument("--sample_iterations", nargs="+", type=int, default=[1000, 9000, 13000])
+   # parser.add_argument("--sample_iterations", nargs="+", type=int, default=[1000, 13000, 20000, 28000])
+    parser.add_argument(
+    "--sample_iterations",
+    nargs="+",
+    type=int,
+    default=list(range(8000, 30001, 2000))
+)
     #args.sample_iterations = list(range(1000, 9000, 100)) + list(range(9000, 13000, 50))
     parser.add_argument("--quiet", action="store_true")
     parser.add_argument("--checkpoint_iterations", nargs="+", type=int, default=[])
-    parser.add_argument("--start_checkpoint", type=str, default = None)
+    parser.add_argument("--start_checkpoint", type=str, default = None) 
     parser.add_argument("--gpu", type=str, default = '-1')
     args = parser.parse_args(sys.argv[1:])
     args.save_iterations.append(args.iterations)
