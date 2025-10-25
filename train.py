@@ -11,7 +11,7 @@
 import cv2
 import os
 import numpy as np
-
+import matplotlib.pyplot as plt
 import subprocess
 cmd = 'nvidia-smi -q -d Memory |grep -A4 GPU|grep Used'
 result = subprocess.run(cmd, shell=True, stdout=subprocess.PIPE).stdout.decode().split('\n')
@@ -57,7 +57,7 @@ try:
 except ImportError:
     TENSORBOARD_FOUND = False
     print("not found tf board")
-from scene.external import get_add_point,MutiPlane_anchor_init , get_depth_mask, get_vector, error_map, gaussian_decomp # 修改 导入scene/external.py中的函数
+from scene.external import ErrorDepth_guided_anchor_init, calculate_scale_factor, get_add_point,MutiPlane_anchor_init , get_depth_mask, get_vector, error_map, gaussian_decomp ,align_monocular_depth_to_metric_scale# 修改 导入scene/external.py中的函数
 def saveRuntimeCode(dst: str) -> None:
     additionalIgnorePatterns = ['.git', '.gitignore']
     ignorePatterns = set()
@@ -89,6 +89,23 @@ def training(dataset, opt, pipe, dataset_name, testing_iterations, saving_iterat
                               dataset.appearance_dim, dataset.ratio, dataset.add_opacity_dist, dataset.add_cov_dist, dataset.add_color_dist)
     scene = Scene(dataset, gaussians, ply_path=ply_path, shuffle=False)
     gaussians.training_setup(opt)
+    # all_scale_factors = []
+    # bg_color = [1, 1, 1] if dataset.white_background else [0, 0, 0]
+    # background = torch.tensor(bg_color, dtype=torch.float32, device="cuda")
+    # with torch.no_grad():  
+    #     for viewpoint_cam in scene.getTrainCameras():
+    #         #render_pkg = render(viewpoint_cam, gaussians, pipe, background=torch.zeros(3, device='cuda'))  # 背景可先置零
+    #         voxel_visible_mask = prefilter_voxel(viewpoint_cam, gaussians, pipe,background)
+    #         render_pkg = render(viewpoint_cam, gaussians, pipe, background, visible_mask=voxel_visible_mask)
+    #         d_gt = render_pkg["depth"]
+    #         d_rel = viewpoint_cam.depth
+            
+    #         S_frame = calculate_scale_factor(d_gt, d_rel)
+    #         all_scale_factors.append(S_frame.item())
+    #     S_global = np.mean(all_scale_factors)
+    # print("Global scale factor S_global:", S_global)
+
+    
     if checkpoint:
         (model_params, first_iter) = torch.load(checkpoint)
         gaussians.restore(model_params, opt)
@@ -124,6 +141,8 @@ def training(dataset, opt, pipe, dataset_name, testing_iterations, saving_iterat
     ema_loss_for_log = 0.0
     progress_bar = tqdm(range(first_iter, opt.iterations), desc="Training progress")
     first_iter += 1
+    save_dir = os.path.join(args.model_path, "debug_dense_points")
+    os.makedirs(save_dir, exist_ok=True)
     for iteration in range(first_iter, opt.iterations + 1):        
         # network gui not available in scaffold-gs yet
         if network_gui.conn == None:
@@ -163,9 +182,9 @@ def training(dataset, opt, pipe, dataset_name, testing_iterations, saving_iterat
         if iteration < opt.update_until and iteration >= 0:
             retain_grad = True
 
+        voxel_visible_mask = prefilter_voxel(viewpoint_cam, gaussians, pipe,background)
         retain_grad = (iteration < opt.update_until and iteration >= 0)
         render_pkg = render(viewpoint_cam, gaussians, pipe, background, visible_mask=voxel_visible_mask, retain_grad=retain_grad)
-        
         image, viewspace_point_tensor, visibility_filter, offset_selection_mask, radii, scaling, opacity,normal,render_depth = render_pkg["render"], render_pkg["viewspace_points"], render_pkg["visibility_filter"], render_pkg["selection_mask"], render_pkg["radii"], render_pkg["scaling"], render_pkg["neural_opacity"],render_pkg["normal"],render_pkg["depth"]
 
         gt_image = viewpoint_cam.original_image.cuda()
@@ -208,8 +227,12 @@ def training(dataset, opt, pipe, dataset_name, testing_iterations, saving_iterat
         #loss.backward()
         loss.backward(retain_graph=retain_grad)
         iter_end.record()
-
         with torch.no_grad():
+            # d_gt= render_pkg["depth"]
+            # d_rel=viewpoint_cam.depth
+            # D_DA_aligned, S_est, T_est=align_monocular_depth_to_metric_scale(d_gt, d_rel)
+          
+    
             # Progress bar
             ema_loss_for_log = 0.4 * loss.item() + 0.6 * ema_loss_for_log
 
@@ -236,30 +259,50 @@ def training(dataset, opt, pipe, dataset_name, testing_iterations, saving_iterat
                 # densification
                 if iteration > opt.update_from and iteration % opt.update_interval == 0:
                     gaussians.adjust_anchor(check_interval=opt.update_interval, success_threshold=opt.success_threshold, grad_threshold=opt.densify_grad_threshold, min_opacity=opt.min_opacity)
-                    if iteration > 10000 and iteration % 2000 == 0:
+                    #if iteration > 100:
+                    if iteration > 5000 and iteration <= 15000  and iteration % 2000 == 0:
                         logger.info(f"\n[ITER {iteration}] Performing multi-plane densification based on current view.")
+                        render_image = render_pkg["render"]
+                        gt_image = viewpoint_cam.original_image.cuda()
+                        monodepth = viewpoint_cam.depth
+                        d_gt= render_pkg["depth"]
                         
-                        # 使用当前帧的相机(viewpoint_cam)和深度图来添加新点
-                        # 这比随机选择一个相机更具相关性
-                        new_xyz, new_features = MutiPlane_anchor_init(
-                            monodepth=viewpoint_cam.depth,    # 使用当前视角的深度图
-                            xyz=gaussians.get_anchor,       # 使用所有现存的锚点作为参考
-                            view_camera=viewpoint_cam,      # 传入当前相机参数
-                            plane_num=4, 
-                            sample_size=8,                 # 建议减小 sample_size，避免一次加入过多点
-                            muti_mode="neighbor",
-                        )
-                        
-                        # 确保真的生成了新点再添加，防止出错
+                       # D_DA_aligned, S_est, T_est=align_monocular_depth_to_metric_scale(d_gt, monodepth)
+                        new_xyz, new_features = ErrorDepth_guided_anchor_init(
+                                render_image, gt_image, monodepth,  # 使用对齐后的深度
+                                view_camera=viewpoint_cam,
+                                xyz=gaussians.get_anchor,
+                                sample_size=1000
+                            )
+                        print("新增new_xyz===========================",new_xyz.shape[0])
                         if new_xyz is not None and new_xyz.shape[0] > 0:
                            # 调用你原来的函数来添加新点和它们的优化器参数
-                           gaussians.add_MultiPlane_anchor(new_xyzs=new_xyz, new_features=new_features)
+                           gaussians.update_anchors_with_error_guidance(new_xyzs=new_xyz, new_features=new_features)
+                           
+                        # # 使用当前帧的相机(viewpoint_cam)和深度图来添加新点
+                        # # 这比随机选择一个相机更具相关性
+                        # new_xyz, new_features = MutiPlane_anchor_init(
+                        #     monodepth=viewpoint_cam.depth,    # 使用当前视角的深度图
+                        #     xyz=gaussians.get_anchor,       # 使用所有现存的锚点作为参考
+                        #     view_camera=viewpoint_cam,      # 传入当前相机参数
+                        #     plane_num=4, 
+                        #     sample_size=8,                 # 建议减小 sample_size，避免一次加入过多点
+                        #     muti_mode="neighbor",
+                        # )
+                        # # if new_xyz is not None and new_xyz.shape[0] > 0:
+                        # #    # 调用你原来的函数来添加新点和它们的优化器参数
+                        # #    gaussians(new_xyzs=new_xyz, new_features=new_features)
+                        # # 确保真的生成了新点再添加，防止出错
+                        # if new_xyz is not None and new_xyz.shape[0] > 0:
+                        #    # 调用你原来的函数来添加新点和它们的优化器参数
+                        #    gaussians.add_MultiPlane_anchor(new_xyzs=new_xyz, new_features=new_features)
                            # 记录一下添加了多少点，方便调试
                            logger.info(f"Added {new_xyz.shape[0]} new points from multi-plane densification.")
-                        if iteration >= 10000 and iteration <= 30000 and iteration % 1000 == 0:
-                            gaussians.prune_point_ours_small(num=args.prune_num1, std=args.prune_std1, planer_numer=4)
-                        elif iteration >=25000 and iteration % 2000 == 0 and iteration < opt.update_until - 2000:
-                            gaussians.prune_point_ours_small(num=args.prune_num2, std=args.prune_std2, planer_numer=4)       
+                        if iteration >= 5000 and iteration <= 25000 and iteration % 1000 == 0:
+                            gaussians.prune_point_ours_small(num=args.prune_num1, std=args.prune_std1, planer_numer=8)
+                        # elif iteration >=25000 and iteration % 2000 == 0 and iteration < opt.update_until - 2000:
+                        elif iteration >=25000 and iteration % 2000 == 0:
+                            gaussians.prune_point_ours_small(num=args.prune_num2, std=args.prune_std2, planer_numer=8)       
             elif iteration == opt.update_until:
                 del gaussians.opacity_accum
                 del gaussians.offset_gradient_accum
@@ -275,11 +318,13 @@ def training(dataset, opt, pipe, dataset_name, testing_iterations, saving_iterat
                 masks = []
                 val_cams = []
                 
-                # 视图选择 (假设 viewpoint_stack 可用)
-                for num in range(2):
-                    idx = randint(0, len(viewpoint_stack) - 1)
-                    val_cams.append(viewpoint_stack[idx])
-
+                # # 视图选择 (假设 viewpoint_stack 可用)
+                # for num in range(2):
+                #     idx = randint(0, len(viewpoint_stack) - 1)
+                #     val_cams.append(viewpoint_stack[idx])
+                #  new Version 获取视角 # 提升Gaussian_mask的稳定性
+                train_cams = scene.getTrainCameras()
+                val_cams = [train_cams[randint(0, len(train_cams)-1)] for _ in range(5)] 
                 # 2. 渲染、误差计算和累积
                 for index, viewpoint_cam in enumerate(val_cams):
                     # ⚠️ 注意: 在 Scaffold-GS 中, render 调用前通常需要 prefilter_voxel 步骤, 此处保留原函数调用。
@@ -326,8 +371,13 @@ def training(dataset, opt, pipe, dataset_name, testing_iterations, saving_iterat
                     # 计算新的最佳位置 (xyz_vector)
                     xyz_vector = get_vector(val_cams, xyzs, max_depth, split_num=5, win_sizes=win_sizes)
 
+                     # 初始化全 False
+                    mask = torch.zeros(gaussians.get_anchor.shape[0], dtype=torch.bool, device='cuda')
+                    print("重置的 anchor 数量: ", len(decomp_mask_indices))
+                    # 将需要重置的 anchor 对应位置置为 True
+                    mask[decomp_mask_indices] = True
                     # 应用重置 (适配 Scaffold-GS: reset_anchor 替代 reset_xyz)
-                    gaussians.reset_anchor(xyz_vector, decomp_mask)
+                    gaussians.reset_anchor(xyz_vector, mask)
             if iteration < opt.iterations:
                 gaussians.optimizer.step()
                 gaussians.optimizer.zero_grad(set_to_none = True)
@@ -619,7 +669,7 @@ if __name__ == "__main__":
     parser.add_argument("--save_iterations", nargs="+", type=int, default=[30_000])
     parser.add_argument("--sample_iterations", nargs="+", type=int, default=[1000, 9000, 13000])
     parser.add_argument("--quiet", action="store_true")
-    parser.add_argument("--checkpoint_iterations", nargs="+", type=int, default=[])
+    parser.add_argument("--checkpoint_iterations", nargs="+", type=int, default=[7000,30000])
     parser.add_argument("--start_checkpoint", type=str, default = None)
     parser.add_argument("--gpu", type=str, default = '-1')
     args = parser.parse_args(sys.argv[1:])

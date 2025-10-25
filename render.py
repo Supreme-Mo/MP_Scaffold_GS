@@ -47,17 +47,20 @@ def render_set(model_path, name, iteration, views, gaussians, pipeline, backgrou
 
         torch.cuda.synchronize(); t0 = time.time()
         voxel_visible_mask = prefilter_voxel(view, gaussians, pipeline, background)
-        render_pkg = render(view, gaussians, pipeline, background, visible_mask=voxel_visible_mask)
+        render_pkg = render(view, gaussians, pipeline, background, visible_mask=voxel_visible_mask)#
+        #render_pkg = render(viewpoint_cam, gaussians, pipe, background, visible_mask=voxel_visible_mask)
         torch.cuda.synchronize(); t1 = time.time()
-        
+        print("Keys available in render_pkg:", render_pkg.keys())
         t_list.append(t1-t0)
 
         rendering = render_pkg["render"]
+        depth=render_pkg["depth"]
         gt = view.original_image[0:3, :, :]
-        name_list.append('{0:05d}'.format(idx) + ".png")
-        torchvision.utils.save_image(rendering, os.path.join(render_path, '{0:05d}'.format(idx) + ".png"))
-        torchvision.utils.save_image(gt, os.path.join(gts_path, '{0:05d}'.format(idx) + ".png"))
-
+        name_list.append('{0:05d}'.format(idx+1) + ".png")
+        torchvision.utils.save_image(rendering, os.path.join(render_path, '{0:05d}'.format(idx+1) + ".png"))
+        torchvision.utils.save_image(gt, os.path.join(gts_path, '{0:05d}'.format(idx+1) + ".png"))
+        depth_path = os.path.join(render_path, '{0:05d}.npy'.format(idx+1))
+        np.save(depth_path, depth.detach().cpu().numpy())
     t = np.array(t_list[5:])
     fps = 1.0 / t.mean()
     print(f'Test FPS: \033[1;35m{fps:.5f}\033[0m')
@@ -77,7 +80,13 @@ def render_sets(dataset : ModelParams, iteration : int, pipeline : PipelineParam
         background = torch.tensor(bg_color, dtype=torch.float32, device="cuda")
         if not os.path.exists(dataset.model_path):
             os.makedirs(dataset.model_path)
-        
+
+        #渲染所有的视角
+        train_cams = scene.getTrainCameras()
+        test_cams = scene.getTestCameras()
+        all_cams = train_cams + test_cams    
+        #render_set(dataset.model_path, "train", scene.loaded_iter, all_cams, gaussians, pipeline, background) #都存在了train下
+
         if not skip_train:
              render_set(dataset.model_path, "train", scene.loaded_iter, scene.getTrainCameras(), gaussians, pipeline, background)
 

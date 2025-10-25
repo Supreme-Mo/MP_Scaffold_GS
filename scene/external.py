@@ -1,3 +1,4 @@
+from typing import Optional, Tuple
 import numpy as np
 import copy
 import torch
@@ -6,8 +7,8 @@ from utils.loss_utils import ssim
 from utils.sh_utils import RGB2SH
 import math
 import torch.nn.functional as F
-
-
+import open3d as o3d
+import os
 def world_to_view_screen(pts3D, K, RT_cam2):
     # print("pts3D",pts3D.max(), pts3D.min())
     wrld_X = RT_cam2.bmm(pts3D)
@@ -750,8 +751,8 @@ def get_vector(view_cameras, xyz, max_depth, split_num, win_sizes):
 
     # --- reference view setup ---
     view_camera = view_cameras[0]
-    temp_R = view_camera.R.detach().cpu().numpy()
-    temp_T = view_camera.T.detach().cpu().numpy()
+    temp_R = view_camera.R
+    temp_T = view_camera.T
     R = np.eye(4, dtype=np.float32)
     R[:3, :3] = temp_R.T
     R[:3, 3] = temp_T
@@ -786,8 +787,8 @@ def get_vector(view_cameras, xyz, max_depth, split_num, win_sizes):
     for inx in range(len(view_cameras) - 1):
         ref_cam = view_cameras[inx + 1]
         R_ref = np.eye(4, dtype=np.float32)
-        R_ref[:3, :3] = ref_cam.R.detach().cpu().numpy().T
-        R_ref[:3, 3] = ref_cam.T.detach().cpu().numpy()
+        R_ref[:3, :3] = ref_cam.R.T
+        R_ref[:3, 3] = ref_cam.T
         K_ref = np.eye(4, dtype=np.float32)
         K_ref[0, 2], K_ref[1, 2] = W / 2.0, H / 2.0
         K_ref[0, 0], K_ref[1, 1] = float(ref_cam.focal[1]), float(ref_cam.focal[0])
@@ -857,3 +858,508 @@ def caculat_muti_scale_SSIM(view_camera, sampler_t, win_size):
                                  sampler[i, 0]:sampler[i, 0] + win_size]
 
     return blocks
+# 修改
+# 增加根据error_map 图进行致密化的方法
+# def ErrorDepth_guided_anchor_init(
+#     render_img, gt_img, monodepth, view_camera, xyz,
+#     top_ratio=0.98, sample_size=800, device="cuda"
+# ):
+#     """
+#     基于渲染误差和深度梯度的自适应致密化点生成函数。
+#     Args:
+#         render_img: 模型渲染结果 (3,H,W)
+#         gt_img: 原始真实图像 (3,H,W)
+#         monodepth: 深度图 (1,H,W)
+#         view_camera: 当前视角 Camera 对象
+#         xyz: 当前已存在 anchor 的世界坐标
+#         top_ratio: 采样阈值比例，例如 0.98 表示取 top 2% 高误差区域
+#         sample_size: 新增点的数量上限
+#         device: "cuda" or "cpu"
+#     Returns:
+#         new_points: (N,3) 新增点的世界坐标
+#         SHfeature: (N,feature_dim) 对应 SH 特征
+#     """
+#     #save_dir = os.path.join(, "debug_dense_points")
+#     #os.makedirs(save_dir, exist_ok=True)
+#     # 确保 monodepth 是 torch tensor
+#     if isinstance(monodepth, np.ndarray):
+#         monodepth = torch.from_numpy(monodepth).float().to(device)
+
+#     # 如果是二维 (H,W)，加 channel 维度
+#     if monodepth.dim() == 2:
+#         monodepth = monodepth.unsqueeze(0)  # (1,H,W)
+#     # === Step 1. 计算渲染误差图 ===
+#     error_map = torch.mean((render_img - gt_img) ** 2, dim=0, keepdim=True)  # (1,H,W)
+#     error_map = error_map / (error_map.max() + 1e-8)
+
+#     # === Step 2. 深度梯度（边缘）增强 ===
+#     depth_grad_x = torch.abs(monodepth[:, :, 1:] - monodepth[:, :, :-1])
+#     depth_grad_y = torch.abs(monodepth[:, 1:, :] - monodepth[:, :-1, :])
+#     depth_grad_x = F.pad(depth_grad_x, (0, 1, 0, 0))
+#     depth_grad_y = F.pad(depth_grad_y, (0, 0, 0, 1))
+#     depth_edge = (depth_grad_x + depth_grad_y) / 2.0
+#     depth_edge = depth_edge / (depth_edge.max() + 1e-8)
+
+#     # === Step 3. 综合权重图 ===
+#     weight_map = 0.7 * error_map + 0.3 * depth_edge
+#     weight_map = weight_map / (weight_map.max() + 1e-8)
+
+#     H, W = weight_map.shape[-2:]
+#     weight_flat = weight_map.view(-1)
+#     threshold = torch.quantile(weight_flat, top_ratio)
+#     candidate_mask = (weight_flat >= threshold)
+#     candidate_idx = torch.nonzero(candidate_mask).squeeze(-1)
+
+#     if candidate_idx.numel() == 0:
+#         print("[Warn] No high-error regions found.")
+#         return None, None
+
+#     # 随机下采样
+#     if candidate_idx.numel() > sample_size:
+#         perm = torch.randperm(candidate_idx.numel(), device=device)
+#         candidate_idx = candidate_idx[perm[:sample_size]]
+
+#     ys = candidate_idx // W
+#     xs = candidate_idx % W
+#     sample_xy = torch.stack([xs, ys], dim=1)
+
+#     # === Step 4. 根据深度反投影到世界坐标 ===
+#     sample_depth = monodepth[0, sample_xy[:, 1], sample_xy[:, 0]]
+
+#     # 构造相机投影矩阵
+#     temp_R = torch.tensor(copy.deepcopy(view_camera.R), device=device).T
+#     temp_T = torch.tensor(copy.deepcopy(view_camera.T), device=device)
+#     R = torch.eye(4, device=device)
+#     R[:3, :3] = temp_R
+#     R[:3, 3] = temp_T
+#     K = torch.eye(4, device=device)
+#     K[0, 2] = W / 2
+#     K[1, 2] = H / 2
+#     K[0, 0] = view_camera.focal[1]
+#     K[1, 1] = view_camera.focal[0]
+
+#     K_inv = torch.inverse(K).unsqueeze(0)
+#     R_inv = torch.inverse(R).unsqueeze(0)
+
+#     pts3D = torch.ones((1, 4, sample_size), device=device)
+#     pts3D[:, 0:2, :] = sample_xy.T.unsqueeze(0) * sample_depth.unsqueeze(0)
+#     pts3D[:, 2, :] = sample_depth.unsqueeze(0)
+#     points = my_view_to_world_coord(pts3D, K_inv, R_inv)
+#     new_points = points[0, :3].permute(1, 0)
+
+#     # === Step 5. 提取颜色并转换为 SH 特征 ===
+#     # RGB_feature = gt_img[:, sample_xy[:, 1], sample_xy[:, 0]].permute(1, 0)
+#     # SHfeature = RGB2SH(RGB_feature)
+#     anchor_feats = torch.randn((new_points.shape[0], 32), device="cuda") * 0.1
+#     # === Step 6. 可选: 保存可视化点云 ===
+   
+#     vis_pcd = o3d.geometry.PointCloud()
+#     vis_pcd.points = o3d.utility.Vector3dVector(new_points.detach().cpu().numpy())
+#     num_points = np.asarray(vis_pcd.points).shape[0]  # 获取点数
+#     colors = np.tile(np.array([[0, 1, 1]]), (num_points, 1))  # 重复成 (N,3)
+#     vis_pcd.colors = o3d.utility.Vector3dVector(colors)
+#     # o3d.io.write_point_cloud(os.path.join(save_dir, f"stage_{100:02d}_full.ply"), vis_pcd)
+#     #o3d.io.write_point_cloud("debug_error_dense_points.ply", vis_pcd)
+#     filename = "debug_error_dense_points.ply"
+#     o3d.io.write_point_cloud(filename, vis_pcd)
+#     print(f"PLY 文件已保存到: {os.path.abspath(filename)}")
+# 修改版本
+def ErrorDepth_guided_anchor_init(
+    render_img, gt_img, monodepth, view_camera, xyz,
+    top_ratio=0.98, sample_size=800, device="cuda",
+    #SCALE_FACTOR_S=198.889008787669 # <--- 引入尺度因子 S
+):
+    """
+    基于渲染误差和深度梯度的自适应致密化点生成函数。
+    """
+    # 确保 monodepth 是 torch tensor
+    if isinstance(monodepth, np.ndarray):
+        monodepth = torch.from_numpy(monodepth).float().to(device)
+
+    # 如果是二维 (H,W)，加 channel 维度
+    if monodepth.dim() == 2:
+        monodepth = monodepth.unsqueeze(0)  # (1,H,W)
+    
+    # # === 关键修改：应用深度尺度对齐 ===
+    # epsilon = 1e-6
+    # monodepth_prime = 1.0 / (monodepth + epsilon) 
+
+    # 2. 尺度对齐：将反转后的相对深度缩放到绝对深度
+    monodepth_metric = monodepth
+    # 将相对深度 monodepth 转换为绝对度量深度 monodepth_metric
+    #monodepth_metric = monodepth * SCALE_FACTOR_S
+    # ------------------------------------
+
+    # === Step 1, 2, 3: 权重图计算 (保持不变) ===
+    error_map = torch.mean((render_img - gt_img) ** 2, dim=0, keepdim=True)  # (1,H,W)
+    error_map = error_map / (error_map.max() + 1e-8)
+
+    depth_grad_x = torch.abs(monodepth_metric[:, :, 1:] - monodepth_metric[:, :, :-1]) # 梯度计算使用缩放后的深度
+    depth_grad_y = torch.abs(monodepth_metric[:, 1:, :] - monodepth_metric[:, :-1, :]) # 梯度计算使用缩放后的深度
+    depth_grad_x = F.pad(depth_grad_x, (0, 1, 0, 0))
+    depth_grad_y = F.pad(depth_grad_y, (0, 0, 0, 1))
+    depth_edge = (depth_grad_x + depth_grad_y) / 2.0
+    depth_edge = depth_edge / (depth_edge.max() + 1e-8)
+
+    weight_map = 0.7 * error_map + 0.3 * depth_edge
+    weight_map = weight_map / (weight_map.max() + 1e-8)
+
+    H, W = weight_map.shape[-2:]
+    weight_flat = weight_map.view(-1)
+    threshold = torch.quantile(weight_flat, top_ratio)
+    candidate_mask = (weight_flat >= threshold)
+    candidate_idx = torch.nonzero(candidate_mask).squeeze(-1)
+
+    if candidate_idx.numel() == 0:
+        print("[Warn] No high-error regions found.")
+        return None, None
+
+    if candidate_idx.numel() > sample_size:
+        perm = torch.randperm(candidate_idx.numel(), device=device)
+        candidate_idx = candidate_idx[perm[:sample_size]]
+
+    ys = candidate_idx // W
+    xs = candidate_idx % W
+    sample_xy = torch.stack([xs, ys], dim=1)
+
+    # === Step 4. 根据**绝对深度**反投影到世界坐标 ===
+    
+    # 从**缩放后的**度量深度图中采样
+    sample_depth = monodepth_metric[0, sample_xy[:, 1], sample_xy[:, 0]]
+    sample_size_actual = sample_depth.shape[0] # 实际采样的点数
+
+    # 提取相机参数
+    fx = view_camera.focal[1]
+    fy = view_camera.focal[0]
+    cx = W / 2 # 假设主点在中心，如果 view_camera 有 cx, cy 应该使用 view_camera.cx, view_camera.cy
+    cy = H / 2
+    
+    # 构建 3D 相机坐标系点 (X_cam, Y_cam, Z_cam)
+    # 修正您的反投影逻辑：X = (u - cx) * Z / fx, Y = (v - cy) * Z / fy, Z = Z
+    
+    # 图像坐标 (u, v)
+    u = sample_xy[:, 0].float()
+    v = sample_xy[:, 1].float()
+    Z = sample_depth.float()
+    
+    X_cam = (u - cx) * Z / fx
+    Y_cam = (v - cy) * Z / fy
+    
+    # 构造齐次相机坐标点 (4, N)
+    pts3D_cam = torch.ones((4, sample_size_actual), device=device)
+    pts3D_cam[0, :] = X_cam
+    pts3D_cam[1, :] = Y_cam
+    pts3D_cam[2, :] = Z # Z 轴深度就是 sample_depth
+
+    # 构造世界到相机 (W2C) 的 R, T 矩阵
+    temp_R = torch.tensor(copy.deepcopy(view_camera.R), device=device) # R (3, 3) W2C 旋转
+    temp_T = torch.tensor(copy.deepcopy(view_camera.T), device=device) # T (3, 1) W2C 平移
+    
+    # 构造 相机到世界 (C2W) 的 R_inv
+    R_inv = torch.eye(4, device=device)
+    R_inv[:3, :3] = temp_R.T # C2W 旋转矩阵
+    R_inv[:3, 3] = -temp_R.T @ temp_T.squeeze() # C2W 平移向量
+
+    # 将相机坐标点 pts3D_cam 转换到世界坐标系
+    # pts3D_world = R_inv @ pts3D_cam
+    points_homo = torch.matmul(R_inv, pts3D_cam) # (4, N)
+    new_points = points_homo[:3].T # (N, 3)
+
+    # === Step 5. 提取颜色并转换为 SH 特征 (保持不变) ===
+    anchor_feats = torch.randn((new_points.shape[0], 32), device="cuda") * 0.1
+    
+    # === Step 6. 可选: 保存可视化点云 (保持不变) ===
+    vis_pcd = o3d.geometry.PointCloud()
+    vis_pcd.points = o3d.utility.Vector3dVector(new_points.detach().cpu().numpy())
+    num_points = np.asarray(vis_pcd.points).shape[0]
+    colors = np.tile(np.array([[0, 1, 1]]), (num_points, 1))
+    vis_pcd.colors = o3d.utility.Vector3dVector(colors)
+    filename = "debug_error_dense_points_scaled.ply" # 更改文件名以区分
+    o3d.io.write_point_cloud(filename, vis_pcd)
+    print(f"PLY 文件已保存到: {os.path.abspath(filename)}")
+
+    return new_points, anchor_feats
+
+   
+#修改计算尺度因子
+# def calculate_scale_factor(D_gt, D_rel):
+#     """
+#     基于中位数比率法，计算将相对深度 D_rel 缩放到绝对深度 D_gt 尺度所需的因子 S。
+    
+#     Args:
+#         D_gt (np.ndarray 或 torch.Tensor): 绝对度量深度图 (Ground Truth Depth)，应具有真实的米制尺度。
+#         D_rel (np.ndarray 或 torch.Tensor): 相对深度图 (Relative Depth)，例如 Depth Anything 的输出。
+        
+#     Returns:
+#         float: 尺度因子 S。
+#     """
+    
+#     # 确保输入是 NumPy 数组，便于处理
+#     if isinstance(D_gt, torch.Tensor):
+#         D_gt = D_gt.cpu().numpy()
+#     if isinstance(D_rel, torch.Tensor):
+#         D_rel = D_rel.cpu().numpy()
+
+#     # 1. 展平数组
+#     D_gt_flat = D_gt.flatten()
+#     D_rel_flat = D_rel.flatten()
+
+#     # 2. 创建有效点掩码 (Mask)
+    
+#     # 排除 D_gt 中的无效深度（例如 0 或 NaN/Inf）
+#     # 排除 D_rel 中的非有限值（例如 NaN/Inf）
+#     mask = (D_gt_flat > 1e-6) & np.isfinite(D_rel_flat)
+    
+#     # 【可选】进一步排除 D_gt 中的异常值（例如，大于 1000m 的点）
+#     # mask &= (D_gt_flat < 1000) 
+
+#     # 3. 检查有效点数量
+#     valid_points_count = mask.sum()
+#     if valid_points_count == 0:
+#         raise ValueError("无法找到足够的有效重叠深度点来计算尺度。请检查 D_gt 和 D_rel 的有效性。")
+
+#     # 4. 提取有效深度值
+#     valid_D_gt = D_gt_flat[mask]
+#     valid_D_rel = D_rel_flat[mask]
+
+#     # 5. 计算中位数比率
+#     median_D_gt = np.median(valid_D_gt)
+#     median_D_rel = np.median(valid_D_rel)
+
+#     # 尺度因子 S: S = median(D_gt) / median(D_rel)
+#     # 这样 D_metric = D_rel * S
+#     if median_D_rel == 0:
+#          raise ValueError("相对深度 D_rel 的中位数为零，无法计算尺度因子。")
+         
+#     SCALE_FACTOR_S = median_D_gt / median_D_rel
+#     print("计算得到的尺度因子 S:", SCALE_FACTOR_S)
+#     return SCALE_FACTOR_S
+def calculate_scale_factor(D_gt, D_rel, inverse_depth=True):
+    """
+    基于中位数比率法，计算将相对深度 D_rel 缩放到绝对深度 D_gt 尺度所需的因子 S。
+    
+    Args:
+        D_gt (np.ndarray 或 torch.Tensor): 绝对度量深度图 (Ground Truth Depth)，应具有真实的米制尺度。
+        D_rel (np.ndarray 或 torch.Tensor): 相对深度图 (Relative Depth)，例如 Depth Anything 的输出。
+        inverse_depth (bool): 如果 D_rel 是逆深度（越大越近），则为 True。
+        
+    Returns:
+        float: 尺度因子 S。
+    """
+    
+    if isinstance(D_gt, torch.Tensor):
+        D_gt = D_gt.cpu().numpy()
+    if isinstance(D_rel, torch.Tensor):
+        D_rel = D_rel.cpu().numpy()
+    
+    D_gt_flat = D_gt.flatten()
+    D_rel_flat = D_rel.flatten()
+    
+    # 有效点掩码
+    mask = (D_gt_flat > 1e-6) & np.isfinite(D_rel_flat)
+    valid_points_count = mask.sum()
+    if valid_points_count == 0:
+        raise ValueError("无法找到足够的有效重叠深度点来计算尺度。")
+    
+    valid_D_gt = D_gt_flat[mask]
+    valid_D_rel = D_rel_flat[mask]
+    
+    # 如果是逆深度，需要先转换为正深度
+    if inverse_depth:
+        # 防止除零
+        valid_D_rel = 1.0 / (valid_D_rel + 1e-6)
+    
+    median_D_gt = np.median(valid_D_gt)
+    median_D_rel = np.median(valid_D_rel)
+    
+    if median_D_rel == 0:
+        raise ValueError("相对深度 D_rel 的中位数为零，无法计算尺度因子。")
+    
+    SCALE_FACTOR_S = median_D_gt / median_D_rel
+    print("计算得到的尺度因子 S:", SCALE_FACTOR_S)
+    return SCALE_FACTOR_S
+
+# 修改
+def align_monocular_depth_to_metric_scale(
+    depth_gs: np.ndarray,         # 3DGS 渲染的度量深度图 (H, W) 或 (1, H, W)
+    depth_da: np.ndarray,         # Depth Anything 深度图 (H, W) 或 (1, H, W)
+    min_depth_threshold: float = 0.1,  # 最小深度阈值 (米), 过滤无效/裁剪区域
+    max_depth_threshold: float = 100.0, # 最大深度阈值 (米)
+    min_valid_points: int = 500       # 最小有效点数要求
+) -> Tuple[np.ndarray, Optional[float], Optional[float]]:
+    """
+    通过最小二乘法将 DepthAnything 深度图 (depth_da) 仿射对齐到 
+    3D 高斯渲染深度图 (depth_gs) 的尺度。
+    
+    对齐公式: D_DA_aligned = S * D_DA + T
+    
+    Args:
+        depth_gs: 3DGS 深度图，作为度量尺度的基准 (Target)。
+        depth_da: DepthAnything 深度图，待对齐的输入 (Source)。
+        min_depth_threshold: 过滤过近或无效深度的阈值。
+        max_depth_threshold: 过滤过远深度的阈值。
+        min_valid_points: 执行拟合所需的最小有效像素数。
+
+    Returns:
+        Tuple[np.ndarray, Optional[float], Optional[float]]: 
+        - 对齐后的 DepthAnything 深度图 (D_DA_aligned)。
+        - 尺度因子 S (如果失败则为 None)。
+        - 偏移量 T (如果失败则为 None)。
+    """
+    
+    if isinstance(depth_gs, torch.Tensor):
+        # .detach() 移除计算图，.cpu() 移到 CPU，.numpy() 转换为 NumPy 数组
+        depth_gs = depth_gs.detach().cpu().numpy()
+    if isinstance(depth_da, torch.Tensor):
+        depth_da = depth_da.detach().cpu().numpy()
+    # 1. 数据预处理和形状统一
+    if depth_gs.ndim > 2:
+        depth_gs = depth_gs.squeeze()
+    if depth_da.ndim > 2:
+        depth_da = depth_da.squeeze()
+        
+    if depth_gs.shape != depth_da.shape:
+        # 尝试调整 DA 深度图大小以匹配 GS 深度图 (如果需要，可能需要更精细的插值)
+        try:
+             import cv2
+             depth_da = cv2.resize(depth_da, (depth_gs.shape[1], depth_gs.shape[0]), interpolation=cv2.INTER_LINEAR)
+             print("[Info] Resized D_DA to match D_GS dimensions.")
+        except ImportError:
+            print("[Error] Dimension mismatch. Please ensure D_GS and D_DA have the same (H, W).")
+            return np.zeros_like(depth_gs), None, None
+
+    # 2. 确定有效像素掩码 (M)
+    
+    # 2.1 过滤无效/过近的深度值
+    mask_gs_valid = (depth_gs > min_depth_threshold) & (depth_gs < max_depth_threshold)
+    mask_da_valid = (depth_da > min_depth_threshold) & (depth_da < max_depth_threshold)
+    
+    # 2.2 联合掩码：只有 GS 和 DA 都有有效深度的地方才用于拟合
+    M = mask_gs_valid & mask_da_valid
+    
+    N = np.sum(M)
+    if N < min_valid_points:
+        print(f"[Warn] Insufficient valid points for alignment. Found {N} points, required {min_valid_points}. Skipping alignment.")
+        # 如果拟合失败，返回原始 DA 深度图
+        return depth_da, None, None
+
+    # 3. 提取有效深度值
+    
+    # 尺度基准 (Target: Y 轴)
+    depth_gs_valid = depth_gs[M] 
+    # 待对齐输入 (Source: X 轴)
+    depth_da_valid = depth_da[M] 
+
+    # 4. 最小二乘拟合 [S, T]
+    
+    # 构造矩阵 A (N x 2): [D_DA, 1]
+    A = np.vstack([depth_da_valid, np.ones(N)]).T
+    
+    # 求解 S 和 T: Y = A * [S, T].T
+    # 求解 Y = D_GS_valid
+    try:
+        # params = [S, T]
+        params, residuals, rank, s = np.linalg.lstsq(A, depth_gs_valid, rcond=None)
+        S = params[0]
+        T = params[1]
+    except Exception as e:
+        print(f"[Error] Least squares fitting failed: {e}")
+        return depth_da, None, None
+
+    print(f"[Success] Alignment calculated. S = {S:.4f}, T = {T:.4f}")
+    
+    # 5. 应用对齐到完整的 D_DA 深度图
+    depth_da_aligned = S * depth_da + T
+    
+    # 6. 裁剪负深度值（对齐后可能会出现负值）
+    depth_da_aligned = np.maximum(depth_da_aligned, 0.0) 
+    visualize_depth_alignment_evaluation(
+        D_GS=depth_gs,
+        D_DA_aligned=depth_da_aligned,
+        D_DA_raw=depth_da,
+        S_est=S,
+        T_est=T,
+        valid_mask=M
+    )
+    return depth_da_aligned, S, T
+
+import matplotlib.pyplot as plt
+
+def visualize_depth_alignment_evaluation(
+    D_GS: np.ndarray,             # 3DGS 度量深度 (Target)
+    D_DA_aligned: np.ndarray,     # DA 对齐后的深度图 (Aligned Source)
+    D_DA_raw: np.ndarray,         # DA 原始深度图 (Raw Source)
+    S_est: float,                 # 估计的尺度因子 S
+    T_est: float,                 # 估计的偏移量 T
+    valid_mask: np.ndarray        # 用于拟合的有效像素掩码 (M)
+):
+    """
+    使用 Matplotlib 可视化深度图对齐结果，并生成误差图进行评估。
+    
+    Args:
+        D_GS: 3DGS 深度图 (NumPy 数组)。
+        D_DA_aligned: 对齐后的 DA 深度图 (NumPy 数组)。
+        D_DA_raw: 原始 DA 深度图 (NumPy 数组)。
+        S_est: 估计的尺度因子 S。
+        T_est: 估计的偏移量 T。
+        valid_mask: 用于拟合的有效像素掩码 M。
+    """
+    
+    # 确保所有输入都是 2D NumPy 数组
+    if D_GS.ndim > 2: D_GS = D_GS.squeeze()
+    if D_DA_aligned.ndim > 2: D_DA_aligned = D_DA_aligned.squeeze()
+    if D_DA_raw.ndim > 2: D_DA_raw = D_DA_raw.squeeze()
+    
+    # 1. 计算误差图 (只在有效区域计算)
+    # 误差 = 目标深度 - 对齐后的深度
+    error_map = np.zeros_like(D_GS, dtype=np.float32)
+    error_map[valid_mask] = D_GS[valid_mask] - D_DA_aligned[valid_mask]
+    
+    # 2. 计算 RMSE
+    N = np.sum(valid_mask)
+    rmse = np.sqrt(np.mean((D_GS[valid_mask] - D_DA_aligned[valid_mask])**2))
+    
+    # 3. 设置可视化
+    fig, axes = plt.subplots(1, 4, figsize=(20, 5))
+    
+    # --- A: 3DGS 目标深度 (基准) ---
+    im0 = axes[0].imshow(D_GS, cmap='viridis')
+    axes[0].set_title('A: 3DGS Metric Depth (Target)')
+    fig.colorbar(im0, ax=axes[0])
+    
+    # --- B: DA 原始深度 (未对齐) ---
+    im1 = axes[1].imshow(D_DA_raw, cmap='viridis')
+    axes[1].set_title('B: DA Raw Depth (Source)')
+    fig.colorbar(im1, ax=axes[1])
+    
+    # --- C: DA 对齐后的深度 (评估对齐后的数值和几何) ---
+    im2 = axes[2].imshow(D_DA_aligned, cmap='viridis')
+    axes[2].set_title(f'C: DA Aligned (S={S_est:.3f}, T={T_est:.3f})')
+    fig.colorbar(im2, ax=axes[2])
+    
+    # --- D: 误差图 (评估对齐后的残差) ---
+    # 使用 'seismic' 或 'RdBu' cmap，中心点为0，便于观察正负误差
+    max_abs_error = np.percentile(np.abs(error_map[valid_mask]), 95) # 使用95th百分位防止离群值主导颜色范围
+    im3 = axes[3].imshow(error_map, cmap='seismic', vmin=-max_abs_error, vmax=max_abs_error)
+    axes[3].set_title(f'D: Error Map (Target - Aligned) | RMSE={rmse:.3f}')
+    fig.colorbar(im3, ax=axes[3], label='Error (Meters)')
+    
+    # 标注有效拟合区域
+    axes[0].contour(valid_mask, levels=[0.5], colors='red', linewidths=0.5)
+    
+    # 最终展示
+    plt.suptitle(f"Depth Alignment Evaluation (Valid Points: {N})", fontsize=16)
+    plt.tight_layout(rect=[0, 0.03, 1, 0.95]) # 调整布局以适应suptitle
+    plt.show()
+
+# --- 示例用法 (需要运行您自己的对齐函数来获取数据) ---
+# if __name__ == '__main__':
+#     # 假设您已通过 align_monocular_depth_to_metric_scale 函数获取了以下变量
+#     # D_GS = ...
+#     # D_DA_raw = ...
+#     # D_DA_aligned = ...
+#     # S_est = ...
+#     # T_est = ...
+#     # valid_mask = ...
+#
+#     # visualize_depth_alignment_evaluation(D_GS, D_DA_aligned, D_DA_raw, S_est, T_est, valid_mask)

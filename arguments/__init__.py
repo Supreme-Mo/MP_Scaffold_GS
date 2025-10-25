@@ -157,10 +157,10 @@ class OptimizationParams(ParamGroup):
         self.sample_win_size = 20
         self.reinit_camNum = 2
         self.plane_num = 16
-        self.prune_num1 = 200
-        self.prune_std1 = 2.0
-        self.prune_num2 = 200
-        self.prune_std2 = 2.0
+        self.prune_num1 = 10
+        self.prune_std1 = 1
+        self.prune_num2 = 100
+        self.prune_std2 = 1.5
         self.vial_view = []
 
         self.win_sizes = [3, 7, 13]
