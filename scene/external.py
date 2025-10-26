@@ -48,7 +48,7 @@ def my_view_to_world_coord(projected_coors, K_inv, RTinv_cam1):
     return wrld_X
 
 
-def MutiPlane_anchor_init(monodepth, xyz, view_camera, plane_num=24, sample_size=20,
+def MutiPlane_anchor_init(monodepth, xyz, view_camera, plane_num=4, sample_size=8,
                           muti_mode="neighbor", itera_num=1, feat_dim=32):
     """
     基于多平面的 Anchor 初始化
@@ -751,7 +751,7 @@ def get_vector(view_cameras, xyz, max_depth, split_num, win_sizes):
 
     # --- reference view setup ---
     view_camera = view_cameras[0]
-    temp_R = view_camera.R
+    temp_R = view_camera.R          # 更正bug.cpu().numpy()
     temp_T = view_camera.T
     R = np.eye(4, dtype=np.float32)
     R[:3, :3] = temp_R.T
