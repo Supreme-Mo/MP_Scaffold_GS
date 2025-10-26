@@ -258,8 +258,8 @@ def training(dataset, opt, pipe, dataset_name, testing_iterations, saving_iterat
         #修改
         #loss = (1.0 - opt.lambda_dssim) * Ll1 + opt.lambda_dssim * ssim_loss + 0.01*scaling_reg
         loss = sum([loss_weights[k] * v for k, v in losses.items()])
-        #loss.backward()
-        loss.backward(retain_graph=retain_grad)
+        loss.backward()
+        #loss.backward(retain_graph=retain_grad)
         iter_end.record()
         with torch.no_grad():
             # d_gt= render_pkg["depth"]
