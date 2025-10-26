@@ -1,4 +1,4 @@
-scene='indoor/room'
+scene='tnt/Truck'
 exp_name='baseline'
 voxel_size=0.005
 update_init_factor=16

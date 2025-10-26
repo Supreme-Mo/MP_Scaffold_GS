@@ -155,28 +155,28 @@ def training(dataset, opt, pipe, dataset_name, testing_iterations, saving_iterat
     for iteration in range(first_iter, opt.iterations + 1):        
 
 
-        if iteration >500 and iteration % 500==0:
-                idx = randint(0, len(viewpoint_stack) - 1)
-                resample_cam = viewpoint_stack[idx]
+        # if iteration >500 and iteration % 500==0:
+        #         idx = randint(0, len(viewpoint_stack) - 1)
+        #         resample_cam = viewpoint_stack[idx]
 
-                # 如果已经有 anchor
-                if hasattr(gaussians, "_anchor"):
-                    xyz = gaussians._anchor
-                else:
-                    xyz = torch.zeros((0, 3), device="cuda")
-                # 多平面生成 anchor
-                    print("Reached iteration 2000")
-                    init_xyz, init_features = MutiPlane_anchor_init(
-                        monodepth=resample_cam.depth,
-                        xyz=xyz,
-                        view_camera=resample_cam,
-                        plane_num=2,
-                        #sample_size=opt.sample_win_size,
-                        sample_size=8,
-                        muti_mode="neighbor",
-                        itera_num=1
-                    )
-                    gaussians.add_MultiPlane_anchor(new_xyzs=init_xyz, new_features=init_features)
+        #         # 如果已经有 anchor
+        #         if hasattr(gaussians, "_anchor"):
+        #             xyz = gaussians._anchor
+        #         else:
+        #             xyz = torch.zeros((0, 3), device="cuda")
+        #         # 多平面生成 anchor
+        #             print("Reached iteration 2000")
+        #             init_xyz, init_features = MutiPlane_anchor_init(
+        #                 monodepth=resample_cam.depth,
+        #                 xyz=xyz,
+        #                 view_camera=resample_cam,
+        #                 plane_num=2,
+        #                 #sample_size=opt.sample_win_size,
+        #                 sample_size=8,
+        #                 muti_mode="neighbor",
+        #                 itera_num=1
+        #             )
+        #             gaussians.add_MultiPlane_anchor(new_xyzs=init_xyz, new_features=init_features)
 
         # network gui not available in scaffold-gs yet
         if network_gui.conn == None:
@@ -294,48 +294,59 @@ def training(dataset, opt, pipe, dataset_name, testing_iterations, saving_iterat
                 if iteration > opt.update_from and iteration % opt.update_interval == 0:
                     gaussians.adjust_anchor(check_interval=opt.update_interval, success_threshold=opt.success_threshold, grad_threshold=opt.densify_grad_threshold, min_opacity=opt.min_opacity)
                 
-                    if iteration > 10000 and iteration % 2000 == 0:
+                    if iteration >=2000 and iteration % 2000 == 0:
                    # if iteration > 100:
-                        # stage_idx += 1
-                        # logger.info(f"\n[ITER {iteration}] Performing multi-plane densification based on current view.")
+                        stage_idx += 1
+                        logger.info(f"\n[ITER {iteration}] Performing multi-plane densification based on current view.")
                         
-                        # # 使用当前帧的相机(viewpoint_cam)和深度图来添加新点
-                        # # 这比随机选择一个相机更具相关性
-                        # new_xyz, new_features = MutiPlane_anchor_init(
-                        #     monodepth=viewpoint_cam.depth,    # 使用当前视角的深度图
-                        #     xyz=gaussians.get_anchor,       # 使用所有现存的锚点作为参考
-                        #     view_camera=viewpoint_cam,      # 传入当前相机参数
-                        #     plane_num=4, 
-                        #     sample_size=8,                 # 建议减小 sample_size，避免一次加入过多点
-                        #     muti_mode="neighbor",
-                        # )
+                        for i, group in enumerate(gaussians.optimizer.param_groups):
+                            param = group['params'][0]
+                            print(f"[Before adding] Group {i}: name={group.get('name','')} shape={param.shape}, requires_grad={param.requires_grad}")
+
+
+
+
+                        # 使用当前帧的相机(viewpoint_cam)和深度图来添加新点
+                        # 这比随机选择一个相机更具相关性
+                        new_xyz, new_features = MutiPlane_anchor_init(
+                            monodepth=viewpoint_cam.depth,    # 使用当前视角的深度图
+                            xyz=gaussians.get_anchor,       # 使用所有现存的锚点作为参考
+                            view_camera=viewpoint_cam,      # 传入当前相机参数
+                            plane_num=4, 
+                            sample_size=8,                 # 建议减小 sample_size，避免一次加入过多点
+                            muti_mode="neighbor",
+                        )
 
 
 
                         
-                        # # 确保真的生成了新点再添加，防止出错
-                        # if new_xyz is not None and new_xyz.shape[0] > 0:
-                        #    # 调用你原来的函数来添加新点和它们的优化器参数
-                        #    gaussians.add_MultiPlane_anchor(new_xyzs=new_xyz, new_features=new_features)
-                        #    # 记录一下添加了多少点，方便调试
-                        #    logger.info(f"Added {new_xyz.shape[0]} new points from multi-plane densification.")
-                        #    all_points = gaussians.get_anchor.detach().cpu().numpy()
-                        #    colors = np.ones_like(all_points) * 0.7  # 默认灰色
+                        # 确保真的生成了新点再添加，防止出错
+                        if new_xyz is not None and new_xyz.shape[0] > 0:
+                           # 调用你原来的函数来添加新点和它们的优化器参数
+                           gaussians.add_MultiPlane_anchor(new_xyzs=new_xyz, new_features=new_features)
+                           for i, group in enumerate(gaussians.optimizer.param_groups):
+                                param = group['params'][0]
+                                print(f"[Before adding] Group {i}: name={group.get('name','')} shape={param.shape}, requires_grad={param.requires_grad}")
+
+                           # 记录一下添加了多少点，方便调试
+                           logger.info(f"Added {new_xyz.shape[0]} new points from multi-plane densification.")
+                           all_points = gaussians.get_anchor.detach().cpu().numpy()
+                           colors = np.ones_like(all_points) * 0.7  # 默认灰色
                            
-                        #    stage_color = cmap[stage_idx % len(cmap)]
-                        #    new_idx_start = all_points.shape[0] - new_xyz.shape[0]
-                        #    new_idx_end = all_points.shape[0]
-                        #    global_stage_indices.append((new_idx_start, new_idx_end))
-                        #    colors[new_idx_start:new_idx_end] = stage_color
-                        #    # 保存每阶段 ply
-                        #    pcd = o3d.geometry.PointCloud()
-                        #    pcd.points = o3d.utility.Vector3dVector(all_points)
-                        #    pcd.colors = o3d.utility.Vector3dVector(colors)
-                        #    o3d.io.write_point_cloud(os.path.join(save_dir, f"stage_{stage_idx:02d}_full.ply"), pcd)
-                        #    logger.info(f"[Stage {stage_idx}] Saved full scene point cloud with new points highlighted")
-                        # visibility_filter = render_pkg["visibility_filter"]
-                        # visible_ratio = visibility_filter.sum().item() / visibility_filter.numel()
-                        # print("visible_ratio--------------------------------触发",visible_ratio)
+                           stage_color = cmap[stage_idx % len(cmap)]
+                           new_idx_start = all_points.shape[0] - new_xyz.shape[0]
+                           new_idx_end = all_points.shape[0]
+                           global_stage_indices.append((new_idx_start, new_idx_end))
+                           colors[new_idx_start:new_idx_end] = stage_color
+                           # 保存每阶段 ply
+                           pcd = o3d.geometry.PointCloud()
+                           pcd.points = o3d.utility.Vector3dVector(all_points)
+                           pcd.colors = o3d.utility.Vector3dVector(colors)
+                           o3d.io.write_point_cloud(os.path.join(save_dir, f"stage_{stage_idx:02d}_full.ply"), pcd)
+                           logger.info(f"[Stage {stage_idx}] Saved full scene point cloud with new points highlighted")
+                        visibility_filter = render_pkg["visibility_filter"]
+                        visible_ratio = visibility_filter.sum().item() / visibility_filter.numel()
+                        print("visible_ratio--------------------------------触发",visible_ratio)
 
 
 

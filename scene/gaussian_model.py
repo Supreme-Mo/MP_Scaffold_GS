@@ -462,7 +462,7 @@ class GaussianModel:
         self._scaling = nn.Parameter(torch.tensor(scales, dtype=torch.float, device="cuda").requires_grad_(True))
         self._rotation = nn.Parameter(torch.tensor(rots, dtype=torch.float, device="cuda").requires_grad_(True))
 
-
+# 好像是用来将新增的张量替换到优化器中的
     def replace_tensor_to_optimizer(self, tensor, name):
         optimizable_tensors = {}
         for group in self.optimizer.param_groups:
@@ -760,118 +760,214 @@ class GaussianModel:
 
         self.max_radii2D = torch.zeros((self._anchor.shape[0]), device=self._anchor.device)
 
-    def add_MultiPlane_anchor(self, new_xyzs, new_features=None): # 修改
+    # def add_MultiPlane_anchor(self, new_xyzs, new_features=None): # 修改
+    #     """
+    #     为多平面初始化增加 anchor 点
+    #     new_xyzs: 新增点 (N,3) Tensor
+    #     new_features: 新增特征 (N,F) Tensor，可为 None
+    #     """
+    #     new_n = new_xyzs.shape[0]
+    #     device = new_xyzs.device
+    #     # 增加 anchor 坐标
+    #     if hasattr(self, "_anchor"):
+    #         self._anchor = torch.cat((self._anchor, new_xyzs), dim=0).contiguous()
+    #         if new_features is not None:
+    #             if hasattr(self, "_anchor_feat"):
+    #                 self._anchor_feat = torch.cat((self._anchor_feat, new_features), dim=0).contiguous()
+    #             else:
+    #                 self._anchor_feat = new_features.clone()
+    #     else:
+    #         self._anchor = new_xyzs.clone()
+    #         self._anchor_feat = new_features.clone() if new_features is not None else None
+    #     if hasattr(self, "_offset") and self._offset is not None:
+    #         # _offset 的 shape: [M_old, n_offsets, 3]
+    #         old_n = self._offset.shape[0]
+    #         if new_n > 0:
+    #             new_offsets = torch.zeros((new_n, self.n_offsets, 3), device=device, dtype=self._offset.dtype)
+    #             self._offset = torch.cat([self._offset, new_offsets], dim=0).contiguous()
+    #     else:
+    #         # 如果不存在，则创建 shape 对齐的全零 offset
+    #         total_n = self._anchor.shape[0]
+    #         self._offset = torch.zeros((total_n, self.n_offsets, 3), device=device)
+    #     if hasattr(self, "_scaling") and self._scaling is not None:
+    #         old_n = self._scaling.shape[0]
+    #         if new_n > 0:
+    #             # scaling shape assumed [M, 2] 或者 [M, something], 保持一致性
+    #             pad_shape = list(self._scaling.shape)
+    #             pad_shape[0] = new_n
+    #             pad = torch.zeros(tuple(pad_shape), device=device, dtype=self._scaling.dtype)
+    #             self._scaling = torch.cat([self._scaling, pad], dim=0).contiguous()
+    #     else:
+    #         # 默认初始化：取 voxel_size 或者 1
+    #         scaling_dim = getattr(self, "_scaling_dim", 6)  # 如果模型有 _scaling_dim 属性则用它，否则默认 6
+    #         default_scaling = torch.ones((self._anchor.shape[0], scaling_dim), device=device) * (getattr(self, "voxel_size", 1.0))
+    #         self._scaling = default_scaling
+
+    #     # --- 扩展 rotation ---
+    #     if hasattr(self, "_rotation") and self._rotation is not None:
+    #         pad = torch.zeros((new_n, self._rotation.shape[1]), device=device, dtype=self._rotation.dtype)
+    #         pad[:, 0] = 1.0  # identity quat
+    #         self._rotation = torch.cat([self._rotation, pad], dim=0).contiguous()
+    #     else:
+    #         self._rotation = torch.zeros((self._anchor.shape[0], 4), device=device)
+    #         self._rotation[:, 0] = 1.0
+
+    #     # --- 扩展 opacity & opacity_accum ---
+    #     if hasattr(self, "_opacity") and self._opacity is not None:
+    #         pad = torch.zeros((new_n, self._opacity.shape[1]), device=device, dtype=self._opacity.dtype)
+    #         self._opacity = torch.cat([self._opacity, pad], dim=0).contiguous()
+    #     else:
+    #         self._opacity = torch.zeros((self._anchor.shape[0], 1), device=device)
+
+    #     if hasattr(self, "opacity_accum") and self.opacity_accum is not None:
+    #         pad = torch.zeros((new_n, self.opacity_accum.shape[1]), device=device, dtype=self.opacity_accum.dtype)
+    #         self.opacity_accum = torch.cat([self.opacity_accum, pad], dim=0).contiguous()
+    #     else:
+    #         self.opacity_accum = torch.zeros((self._anchor.shape[0], 1), device=device)
+
+    #     # --- 扩展 anchor_demon（如果有） ---
+    #     if hasattr(self, "anchor_demon") and self.anchor_demon is not None:
+    #         pad = torch.zeros((new_n, self.anchor_demon.shape[1]), device=device, dtype=self.anchor_demon.dtype)
+    #         self.anchor_demon = torch.cat([self.anchor_demon, pad], dim=0).contiguous()
+    #     else:
+    #         self.anchor_demon = torch.zeros((self._anchor.shape[0], 1), device=device)
+    #     # 扩展 offset_gradient_accum
+    #     if hasattr(self, "offset_gradient_accum"):
+    #         pad = torch.zeros((new_n*self.n_offsets, 1), device=device)
+    #         self.offset_gradient_accum = torch.cat([self.offset_gradient_accum, pad], dim=0)
+    #     else:
+    #         self.offset_gradient_accum = torch.zeros((self.get_anchor.shape[0]*self.n_offsets, 1), device=device)
+
+    #     # 扩展 offset_denom
+    #     if hasattr(self, "offset_denom"):
+    #         pad = torch.zeros((new_n*self.n_offsets, 1), device=device)
+    #         self.offset_denom = torch.cat([self.offset_denom, pad], dim=0)
+    #     else:
+    #         self.offset_denom = torch.zeros((self.get_anchor.shape[0]*self.n_offsets, 1), device=device)
+    #     if hasattr(self, "optimizer") and self.optimizer is not None:
+    #         for group in self.optimizer.param_groups:
+    #             param = group['params'][0]
+    #             if any(x in group['name'] for x in ['mlp', 'conv', 'feat_base', 'embedding']):
+    #                 continue
+
+    #             # 扩展参数
+    #             new_param_data = torch.cat(
+    #                 [param.data, torch.zeros((new_n,) + tuple(param.shape[1:]), device=param.device)],
+    #                 dim=0
+    #             )
+    #             new_param = nn.Parameter(new_param_data.requires_grad_(True))
+
+    #             # 扩展 optimizer state
+    #             old_state = self.optimizer.state.get(param, {})
+    #             new_state = {}
+    #             for k, v in old_state.items():
+    #                 if isinstance(v, torch.Tensor) and v.dim() > 0 and v.shape[0] == param.shape[0]:
+    #                     pad = torch.zeros((new_n,) + tuple(v.shape[1:]), device=v.device, dtype=v.dtype)
+    #                     new_state[k] = torch.cat([v, pad], dim=0)
+    #                 else:
+    #                     new_state[k] = v
+
+    #             # 替换参数与状态
+    #             group['params'][0] = new_param
+    #             self.optimizer.state[new_param] = new_state
+    #             if param in self.optimizer.state:
+    #                 del self.optimizer.state[param]
+    def add_MultiPlane_anchor(self, new_xyzs, new_features=None):
         """
-        为多平面初始化增加 anchor 点
+        为多平面初始化增加 anchor 点，同时保证新增参数被 optimizer 跟踪。
         new_xyzs: 新增点 (N,3) Tensor
         new_features: 新增特征 (N,F) Tensor，可为 None
         """
+        if new_xyzs is None or new_xyzs.shape[0] == 0:
+            return  # 没有新增点，直接返回
+
         new_n = new_xyzs.shape[0]
         device = new_xyzs.device
-        # 增加 anchor 坐标
-        if hasattr(self, "_anchor"):
-            self._anchor = torch.cat((self._anchor, new_xyzs), dim=0).contiguous()
-            if new_features is not None:
-                if hasattr(self, "_anchor_feat"):
-                    self._anchor_feat = torch.cat((self._anchor_feat, new_features), dim=0).contiguous()
-                else:
-                    self._anchor_feat = new_features.clone()
+
+        # --- 1. 扩展 anchor ---
+        if hasattr(self, "_anchor") and self._anchor is not None:
+            anchor_data = torch.cat([self._anchor.detach(), new_xyzs], dim=0)
         else:
-            self._anchor = new_xyzs.clone()
-            self._anchor_feat = new_features.clone() if new_features is not None else None
+            anchor_data = new_xyzs.detach()
+        self._anchor = nn.Parameter(anchor_data.requires_grad_(True))
+
+        # --- 2. 扩展 anchor_feat ---
+        if new_features is not None:
+            if hasattr(self, "_anchor_feat") and self._anchor_feat is not None:
+                anchor_feat_data = torch.cat([self._anchor_feat.detach(), new_features], dim=0)
+            else:
+                anchor_feat_data = new_features.detach()
+            self._anchor_feat = nn.Parameter(anchor_feat_data.requires_grad_(True))
+
+        # --- 3. 扩展 offset ---
+        new_offsets = torch.zeros((new_n, self.n_offsets, 3), device=device)
         if hasattr(self, "_offset") and self._offset is not None:
-            # _offset 的 shape: [M_old, n_offsets, 3]
-            old_n = self._offset.shape[0]
-            if new_n > 0:
-                new_offsets = torch.zeros((new_n, self.n_offsets, 3), device=device, dtype=self._offset.dtype)
-                self._offset = torch.cat([self._offset, new_offsets], dim=0).contiguous()
+            offset_data = torch.cat([self._offset.detach(), new_offsets], dim=0)
         else:
-            # 如果不存在，则创建 shape 对齐的全零 offset
-            total_n = self._anchor.shape[0]
-            self._offset = torch.zeros((total_n, self.n_offsets, 3), device=device)
+            offset_data = new_offsets
+        self._offset = nn.Parameter(offset_data.requires_grad_(True))
+
+        # --- 4. 扩展 scaling ---
+        scaling_dim = getattr(self, "_scaling_dim", 6)
+        default_scaling = torch.ones((new_n, scaling_dim), device=device) * getattr(self, "voxel_size", 1.0)
         if hasattr(self, "_scaling") and self._scaling is not None:
-            old_n = self._scaling.shape[0]
-            if new_n > 0:
-                # scaling shape assumed [M, 2] 或者 [M, something], 保持一致性
-                pad_shape = list(self._scaling.shape)
-                pad_shape[0] = new_n
-                pad = torch.zeros(tuple(pad_shape), device=device, dtype=self._scaling.dtype)
-                self._scaling = torch.cat([self._scaling, pad], dim=0).contiguous()
+            scaling_data = torch.cat([self._scaling.detach(), default_scaling], dim=0)
         else:
-            # 默认初始化：取 voxel_size 或者 1
-            scaling_dim = getattr(self, "_scaling_dim", 6)  # 如果模型有 _scaling_dim 属性则用它，否则默认 6
-            default_scaling = torch.ones((self._anchor.shape[0], scaling_dim), device=device) * (getattr(self, "voxel_size", 1.0))
-            self._scaling = default_scaling
+            scaling_data = default_scaling
+        self._scaling = nn.Parameter(scaling_data.requires_grad_(True))
 
-        # --- 扩展 rotation ---
+        # --- 5. 扩展 rotation ---
+        new_rots = torch.zeros((new_n, 4), device=device)
+        new_rots[:, 0] = 1.0  # identity quaternion
         if hasattr(self, "_rotation") and self._rotation is not None:
-            pad = torch.zeros((new_n, self._rotation.shape[1]), device=device, dtype=self._rotation.dtype)
-            pad[:, 0] = 1.0  # identity quat
-            self._rotation = torch.cat([self._rotation, pad], dim=0).contiguous()
+            rot_data = torch.cat([self._rotation.detach(), new_rots], dim=0)
         else:
-            self._rotation = torch.zeros((self._anchor.shape[0], 4), device=device)
-            self._rotation[:, 0] = 1.0
+            rot_data = new_rots
+        # 保留原来的 requires_grad 状态
+        requires_grad_rot = getattr(self._rotation, 'requires_grad', False)
+        self._rotation = nn.Parameter(rot_data.requires_grad_(requires_grad_rot))
 
-        # --- 扩展 opacity & opacity_accum ---
+        # --- 6. 扩展 opacity ---
+        new_opacity = inverse_sigmoid(0.1 * torch.ones((new_n, 1), device=device))
         if hasattr(self, "_opacity") and self._opacity is not None:
-            pad = torch.zeros((new_n, self._opacity.shape[1]), device=device, dtype=self._opacity.dtype)
-            self._opacity = torch.cat([self._opacity, pad], dim=0).contiguous()
+            opacity_data = torch.cat([self._opacity.detach(), new_opacity], dim=0)
         else:
-            self._opacity = torch.zeros((self._anchor.shape[0], 1), device=device)
+            opacity_data = new_opacity
+        self._opacity = nn.Parameter(opacity_data.requires_grad_(True))
 
-        if hasattr(self, "opacity_accum") and self.opacity_accum is not None:
-            pad = torch.zeros((new_n, self.opacity_accum.shape[1]), device=device, dtype=self.opacity_accum.dtype)
-            self.opacity_accum = torch.cat([self.opacity_accum, pad], dim=0).contiguous()
-        else:
-            self.opacity_accum = torch.zeros((self._anchor.shape[0], 1), device=device)
+        # --- 7. 扩展梯度累积量 ---
+        def _expand_tensor(tensor, new_rows):
+            if tensor is None:
+                return torch.zeros((new_rows, 1), device=device)
+            return torch.cat([tensor, torch.zeros((new_rows, tensor.shape[1]), device=device)], dim=0)
 
-        # --- 扩展 anchor_demon（如果有） ---
-        if hasattr(self, "anchor_demon") and self.anchor_demon is not None:
-            pad = torch.zeros((new_n, self.anchor_demon.shape[1]), device=device, dtype=self.anchor_demon.dtype)
-            self.anchor_demon = torch.cat([self.anchor_demon, pad], dim=0).contiguous()
-        else:
-            self.anchor_demon = torch.zeros((self._anchor.shape[0], 1), device=device)
-        # 扩展 offset_gradient_accum
-        if hasattr(self, "offset_gradient_accum"):
-            pad = torch.zeros((new_n*self.n_offsets, 1), device=device)
-            self.offset_gradient_accum = torch.cat([self.offset_gradient_accum, pad], dim=0)
-        else:
-            self.offset_gradient_accum = torch.zeros((self.get_anchor.shape[0]*self.n_offsets, 1), device=device)
+        self.opacity_accum = _expand_tensor(getattr(self, "opacity_accum", None), new_n)
+        self.anchor_demon = _expand_tensor(getattr(self, "anchor_demon", None), new_n)
+        self.offset_gradient_accum = _expand_tensor(getattr(self, "offset_gradient_accum", None), new_n * self.n_offsets)
+        self.offset_denom = _expand_tensor(getattr(self, "offset_denom", None), new_n * self.n_offsets)
 
-        # 扩展 offset_denom
-        if hasattr(self, "offset_denom"):
-            pad = torch.zeros((new_n*self.n_offsets, 1), device=device)
-            self.offset_denom = torch.cat([self.offset_denom, pad], dim=0)
-        else:
-            self.offset_denom = torch.zeros((self.get_anchor.shape[0]*self.n_offsets, 1), device=device)
+        # --- 8. 将新增参数加入 optimizer ---
         if hasattr(self, "optimizer") and self.optimizer is not None:
             for group in self.optimizer.param_groups:
-                param = group['params'][0]
-                if any(x in group['name'] for x in ['mlp', 'conv', 'feat_base', 'embedding']):
-                    continue
-
-                # 扩展参数
-                new_param_data = torch.cat(
-                    [param.data, torch.zeros((new_n,) + tuple(param.shape[1:]), device=param.device)],
-                    dim=0
-                )
-                new_param = nn.Parameter(new_param_data.requires_grad_(True))
-
-                # 扩展 optimizer state
-                old_state = self.optimizer.state.get(param, {})
-                new_state = {}
-                for k, v in old_state.items():
-                    if isinstance(v, torch.Tensor) and v.dim() > 0 and v.shape[0] == param.shape[0]:
-                        pad = torch.zeros((new_n,) + tuple(v.shape[1:]), device=v.device, dtype=v.dtype)
-                        new_state[k] = torch.cat([v, pad], dim=0)
-                    else:
-                        new_state[k] = v
-
-                # 替换参数与状态
-                group['params'][0] = new_param
-                self.optimizer.state[new_param] = new_state
-                if param in self.optimizer.state:
-                    del self.optimizer.state[param]
+                param_name = group.get("name", "")
+                if param_name in ["anchor", "offset", "scaling", "rotation", "opacity", "anchor_feat"]:
+                    old_param = group['params'][0]
+                    # 拼接后的 tensor 已经是 nn.Parameter，替换 optimizer
+                    new_param = getattr(self, f"_{param_name}") if param_name != "anchor_feat" else self._anchor_feat
+                    # 迁移状态
+                    old_state = self.optimizer.state.get(old_param, {})
+                    new_state = {}
+                    for k, v in old_state.items():
+                        if isinstance(v, torch.Tensor) and v.shape[0] == old_param.shape[0]:
+                            pad_shape = (new_n,) + tuple(v.shape[1:])
+                            pad = torch.zeros(pad_shape, device=v.device, dtype=v.dtype)
+                            new_state[k] = torch.cat([v, pad], dim=0)
+                        else:
+                            new_state[k] = v
+                    group['params'][0] = new_param
+                    self.optimizer.state[new_param] = new_state
+                    if old_param in self.optimizer.state:
+                        del self.optimizer.state[old_param]
 
     def anchor_growing(self, grads, threshold, offset_mask):
         ## 
