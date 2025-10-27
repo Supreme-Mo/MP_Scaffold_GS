@@ -974,60 +974,114 @@ class GaussianModel:
 
     def add_MultiPlane_anchor(self, new_xyzs, new_features=None):
         """
-        为多平面初始化增加 anchor 点，同时保证新增参数被 optimizer 跟踪，
-        并保留旧参数的 Adam 动量。
+        为多平面初始化增加 anchor 点，同时保证新增参数被 optimizer 跟踪。
         new_xyzs: 新增点 (N,3) Tensor
         new_features: 新增特征 (N,F) Tensor，可为 None
         """
         if new_xyzs is None or new_xyzs.shape[0] == 0:
-            return  # 没有新增点，直接返回
+            return
 
-        new_n = new_xyzs.shape[0]
         device = new_xyzs.device
+        new_n = new_xyzs.shape[0]
 
-        # --- 1. 构建参数字典 d ---
-        # d 的键是你模型里对应的属性名，值是要新增的张量
-        d = {"_anchor": new_xyzs}
+        # --- 1. 构建字典 d，只包含新增点 ---
+        d = {"anchor": new_xyzs.detach()}
 
         if new_features is not None:
-            d["_anchor_feat"] = new_features
+            d["anchor_feat"] = new_features.detach()
 
-        # 可选扩展 offset
         if hasattr(self, "_offset") and self._offset is not None:
-            new_offsets = torch.zeros((new_n, self.n_offsets, 3), device=device)
-            d["_offset"] = new_offsets
+            d["offset"] = torch.zeros((new_n, self.n_offsets, 3), device=device)
 
-        # 可选扩展 scaling
         if hasattr(self, "_scaling") and self._scaling is not None:
             scaling_dim = getattr(self, "_scaling_dim", 6)
-            default_scaling = torch.ones((new_n, scaling_dim), device=device) * getattr(self, "voxel_size", 1.0)
-            d["_scaling"] = default_scaling
+            d["scaling"] = torch.ones((new_n, scaling_dim), device=device) * getattr(self, "voxel_size", 1.0)
 
-        # 可选扩展 rotation
         if hasattr(self, "_rotation") and self._rotation is not None:
             new_rots = torch.zeros((new_n, 4), device=device)
-            new_rots[:, 0] = 1.0  # identity quaternion
-            d["_rotation"] = new_rots
+            new_rots[:, 0] = 1.0
+            d["rotation"] = new_rots
 
-        # 可选扩展 opacity
         if hasattr(self, "_opacity") and self._opacity is not None:
-            new_opacity = inverse_sigmoid(0.1 * torch.ones((new_n, 1), device=device))
-            d["_opacity"] = new_opacity
+            d["opacity"] = inverse_sigmoid(0.1 * torch.ones((new_n, 1), device=device))
 
-        # --- 2. 使用框架自带函数安全扩展参数并同步 optimizer ---
+        # --- 2. 交给框架处理拼接和 optimizer ---
         if hasattr(self, "optimizer") and self.optimizer is not None:
-            self.cat_tensors_to_optimizer(d)  # 核心函数，保留旧动量并加入新参数 (非常重要，主要是改了这里，利用了原本的框架函数)
+            self.cat_tensors_to_optimizer(d)
+         # --- 1. 扩展 anchor ---
+        if hasattr(self, "_anchor") and self._anchor is not None:
+            anchor_data = torch.cat([self._anchor.detach(), new_xyzs], dim=0)
+        else:
+            anchor_data = new_xyzs.detach()
+        self._anchor = nn.Parameter(anchor_data.requires_grad_(True))
+
+        # --- 2. 扩展 anchor_feat ---
+        if new_features is not None:
+            if hasattr(self, "_anchor_feat") and self._anchor_feat is not None:
+                anchor_feat_data = torch.cat([self._anchor_feat.detach(), new_features], dim=0)
+            else:
+                anchor_feat_data = new_features.detach()
+            self._anchor_feat = nn.Parameter(anchor_feat_data.requires_grad_(True))
+
+        # --- 3. 扩展 offset ---
+        new_offsets = torch.zeros((new_n, self.n_offsets, 3), device=device)
+        if hasattr(self, "_offset") and self._offset is not None:
+            offset_data = torch.cat([self._offset.detach(), new_offsets], dim=0)
+        else:
+            offset_data = new_offsets
+        self._offset = nn.Parameter(offset_data.requires_grad_(True))
+
+        # --- 4. 扩展 scaling ---
+        scaling_dim = getattr(self, "_scaling_dim", 6)
+        default_scaling = torch.ones((new_n, scaling_dim), device=device) * getattr(self, "voxel_size", 1.0)
+        if hasattr(self, "_scaling") and self._scaling is not None:
+            scaling_data = torch.cat([self._scaling.detach(), default_scaling], dim=0)
+        else:
+            scaling_data = default_scaling
+        self._scaling = nn.Parameter(scaling_data.requires_grad_(True))
+
+        # --- 5. 扩展 rotation ---
+        new_rots = torch.zeros((new_n, 4), device=device)
+        new_rots[:, 0] = 1.0  # identity quaternion
+        if hasattr(self, "_rotation") and self._rotation is not None:
+            rot_data = torch.cat([self._rotation.detach(), new_rots], dim=0)
+        else:
+            rot_data = new_rots
+        # 保留原来的 requires_grad 状态
+        requires_grad_rot = getattr(self._rotation, 'requires_grad', False)
+        self._rotation = nn.Parameter(rot_data.requires_grad_(requires_grad_rot))
+
+        # --- 6. 扩展 opacity ---
+        new_opacity = inverse_sigmoid(0.1 * torch.ones((new_n, 1), device=device))
+        if hasattr(self, "_opacity") and self._opacity is not None:
+            opacity_data = torch.cat([self._opacity.detach(), new_opacity], dim=0)
+        else:
+            opacity_data = new_opacity
+        self._opacity = nn.Parameter(opacity_data.requires_grad_(True))
+
+
+
+
+
 
         # --- 3. 扩展辅助梯度累积张量 ---
-        def _expand_tensor(tensor, new_rows, col_dim=1):
-            if tensor is None:
-                return torch.zeros((new_rows, col_dim), device=device)
-            return torch.cat([tensor, torch.zeros((new_rows, tensor.shape[1]), device=device)], dim=0)
+        total_anchor = self._anchor.shape[0]  # 注意：总行数等于拼接后的 anchor 数量
 
-        self.opacity_accum = _expand_tensor(getattr(self, "opacity_accum", None), new_n)
-        self.anchor_demon = _expand_tensor(getattr(self, "anchor_demon", None), new_n)
-        self.offset_gradient_accum = _expand_tensor(getattr(self, "offset_gradient_accum", None), new_n * getattr(self, "n_offsets", 1))
-        self.offset_denom = _expand_tensor(getattr(self, "offset_denom", None), new_n * getattr(self, "n_offsets", 1))
+        def _expand_tensor(tensor, total_rows, col_dim=1):
+            if tensor is None:
+                return torch.zeros((total_rows, col_dim), device=device)
+            old_rows = tensor.shape[0]
+            if old_rows == total_rows:
+                return tensor
+            new_rows = total_rows - old_rows
+            return torch.cat([tensor, torch.zeros((new_rows, tensor.shape[1]), device=tensor.device)], dim=0)
+
+        self.opacity_accum = _expand_tensor(getattr(self, "opacity_accum", None), total_anchor)
+        self.anchor_demon = _expand_tensor(getattr(self, "anchor_demon", None), total_anchor)
+        self.offset_gradient_accum = _expand_tensor(getattr(self, "offset_gradient_accum", None), total_anchor * getattr(self, "n_offsets", 1))
+        self.offset_denom = _expand_tensor(getattr(self, "offset_denom", None), total_anchor * getattr(self, "n_offsets", 1))
+        print("anchors number:", self._anchor.shape[0])
+ 
 
     
     

@@ -286,16 +286,15 @@ def training(dataset, opt, pipe, dataset_name, testing_iterations, saving_iterat
                 scene.save(iteration)
             
             # densification
-            if iteration < opt.update_until and iteration > opt.start_stat:
+            if iteration < opt.update_until and iteration > 100:
                 # add statis
                 gaussians.training_statis(viewspace_point_tensor, opacity, visibility_filter, offset_selection_mask, voxel_visible_mask)
                
                 # densification
                 if iteration > opt.update_from and iteration % opt.update_interval == 0:
                     gaussians.adjust_anchor(check_interval=opt.update_interval, success_threshold=opt.success_threshold, grad_threshold=opt.densify_grad_threshold, min_opacity=opt.min_opacity)
-                
-                    if iteration >=2000 and iteration % 2000 == 0:
-                   # if iteration > 100:
+                if iteration >=5000 and iteration <=opt.update_until and iteration % 5000 == 0:
+                    #if iteration > 100:
                         stage_idx += 1
                         logger.info(f"\n[ITER {iteration}] Performing multi-plane densification based on current view.")
                         
@@ -324,6 +323,8 @@ def training(dataset, opt, pipe, dataset_name, testing_iterations, saving_iterat
                         if new_xyz is not None and new_xyz.shape[0] > 0:
                            # 调用你原来的函数来添加新点和它们的优化器参数
                            gaussians.add_MultiPlane_anchor(new_xyzs=new_xyz, new_features=new_features)
+                       
+                           
                            for i, group in enumerate(gaussians.optimizer.param_groups):
                                 param = group['params'][0]
                                 print(f"[Before adding] Group {i}: name={group.get('name','')} shape={param.shape}, requires_grad={param.requires_grad}")
@@ -355,7 +356,7 @@ def training(dataset, opt, pipe, dataset_name, testing_iterations, saving_iterat
                        # if iteration > 12000 and visible_ratio < 0.6: # 通过可见性触发,尝试解决剪枝过快的问题
                             #print("visible_ratio--------------------------------触发",visible_ratio)
                         
-                        gaussians.prune_point_ours_small(num=args.prune_num1, std=args.prune_std1, planer_numer=4)
+                       # gaussians.prune_point_ours_small(num=args.prune_num1, std=args.prune_std1, planer_numer=4)
                         # elif iteration >=25000 and iteration % 1000 == 0 and iteration < opt.update_until - 2000:
                         #     gaussians.prune_point_ours_small(num=args.prune_num2, std=args.prune_std2, planer_numer=4)       
             elif iteration == opt.update_until:
