@@ -236,7 +236,7 @@ def training(dataset, opt, pipe, dataset_name, testing_iterations, saving_iterat
                     gt_image = viewpoint_cam.original_image.cuda()
                     errormap = (image - gt_image).abs().mean(dim=0)  # HxW，每个像素 RGB 平均
                     high_error_ratio = (errormap > 0.1).float().mean().item()  # 0.1 可调
-                    if high_error_ratio > 0.2:  # 高误差区域超过 20% 时触发
+                    if high_error_ratio > 0.18:  # 高误差区域超过 20% 时触发
                         trigger_densification = True
 
                     # 2️⃣ 可选：训练误差下降缓慢触发
@@ -257,8 +257,8 @@ def training(dataset, opt, pipe, dataset_name, testing_iterations, saving_iterat
                             monodepth=viewpoint_cam.depth,
                             xyz=gaussians._anchor,
                             view_camera=viewpoint_cam,
-                            plane_num=4,
-                            sample_size=8,
+                            plane_num=8,
+                            sample_size=16,
                             muti_mode="neighbor",
                         )
 
@@ -654,8 +654,8 @@ if __name__ == "__main__":
     # parser.add_argument("--save_iterations", nargs="+", type=int, default=[3_000, 7_000, 30_000])
     parser.add_argument("--test_iterations", nargs="+", type=int, default=[30_000])
     parser.add_argument("--save_iterations", nargs="+", type=int, default=[30_000])
-   # parser.add_argument("--sample_iterations", nargs="+", type=int, default=[1000, 9000, 13000])
-    parser.add_argument("--sample_iterations", nargs="+", type=int, default=[1000, 13000, 20000])
+    parser.add_argument("--sample_iterations", nargs="+", type=int, default=[1000, 9000, 13000])
+    #parser.add_argument("--sample_iterations", nargs="+", type=int, default=[1000, 13000, 20000])
 #     parser.add_argument(
 #     "--sample_iterations",
 #     nargs="+",

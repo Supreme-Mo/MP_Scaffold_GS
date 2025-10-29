@@ -1099,7 +1099,7 @@ class GaussianModel:
 
         if new_features is not None:
             d["anchor_feat"] = new_features.detach()
-
+        
         if hasattr(self, "_offset") and self._offset is not None:
             d["offset"] = torch.zeros((new_n, self.n_offsets, 3), device=device)
 
@@ -1160,6 +1160,10 @@ class GaussianModel:
         # 保留原来的 requires_grad 状态
         requires_grad_rot = getattr(self._rotation, 'requires_grad', False)
         self._rotation = nn.Parameter(rot_data.requires_grad_(requires_grad_rot))
+
+
+
+        
     def add_MultiPlane_anchor(self, new_xyzs, new_features=None):
         if new_xyzs is None or new_xyzs.shape[0] == 0:
             return
@@ -1169,10 +1173,29 @@ class GaussianModel:
 
         # --- 1. 构建字典 d，只包含新增点 ---
         d = {"anchor": new_xyzs.detach()}
+        if hasattr(self, "_anchor_feat") and self._anchor_feat is not None:
+            # 基于空间邻近插值初始化新 anchor 特征
+            # 1. 计算新 anchor 到已有 anchor 的距离
+            existing_xyz = self._anchor  # (N_old, 3)
+            new_xyz = new_xyzs          # (N_new, 3)
 
-        if new_features is not None:
-            d["anchor_feat"] = new_features.detach()
+            # 计算每个新点到已有点的 L2 距离
+            dist = torch.cdist(new_xyz, existing_xyz)  # (N_new, N_old)
 
+            # 2. 找到 k 个最近邻
+            k = min(3, existing_xyz.shape[0])  # 可以调 k
+            knn_dist, knn_idx = torch.topk(dist, k, largest=False, dim=1)  # (N_new, k)
+
+            # 3. 根据距离做加权平均
+            weight = 1.0 / (knn_dist + 1e-6)          # 避免除零
+            weight = weight / weight.sum(dim=1, keepdim=True)
+
+            new_feat = (self._anchor_feat[knn_idx] * weight.unsqueeze(-1)).sum(dim=1)  # (N_new, F)
+
+            d["anchor_feat"] = new_feat.detach()
+        else:
+            # 没有旧 anchor 特征就用随机初始化
+            d["anchor_feat"] = torch.randn((new_n, self.feat_dim), device=device)
         if hasattr(self, "_offset") and self._offset is not None:
             d["offset"] = torch.zeros((new_n, self.n_offsets, 3), device=device)
 
