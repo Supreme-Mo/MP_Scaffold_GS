@@ -108,7 +108,24 @@ def training(dataset, opt, pipe, dataset_name, testing_iterations, saving_iterat
     #     idx = randint(0, len(viewpoint_stack) - 1)
     #     resample_cam = viewpoint_stack[idx]
 
-    #    
+    #     # 如果已经有 anchor
+    #     if hasattr(gaussians, "_anchor"):
+    #         xyz = gaussians._anchor
+    #     else:
+    #         xyz = torch.zeros((0, 3), device="cuda")
+    #      # 多平面生成 anchor
+    #     #print("....depth的形状：",resample_cam.depth.shape)
+    #     init_xyz, init_features = MutiPlane_anchor_init(
+    #         monodepth=resample_cam.depth,
+    #         xyz=xyz,
+    #         view_camera=resample_cam,
+    #         plane_num=4,
+    #         #sample_size=opt.sample_win_size,
+    #         sample_size=8,
+    #         muti_mode="neighbor",
+    #         itera_num=num
+    #     )
+    #     gaussians.add_MultiPlane_anchor(new_xyzs=init_xyz, new_features=init_features)
     iter_start = torch.cuda.Event(enable_timing = True)
     iter_end = torch.cuda.Event(enable_timing = True)
     print("anchor.........",gaussians.get_anchor.shape[0])
@@ -203,7 +220,12 @@ def training(dataset, opt, pipe, dataset_name, testing_iterations, saving_iterat
         #loss.backward(retain_graph=retain_grad)
         iter_end.record()
         with torch.no_grad():
-        
+            # d_gt= render_pkg["depth"]
+            # d_rel=viewpoint_cam.depth
+            # D_DA_aligned, S_est, T_est=align_monocular_depth_to_metric_scale(d_gt, d_rel)
+          
+    
+            # Progress bar
             ema_loss_for_log = 0.4 * loss.item() + 0.6 * ema_loss_for_log
 
             if iteration % 10 == 0:
@@ -229,60 +251,64 @@ def training(dataset, opt, pipe, dataset_name, testing_iterations, saving_iterat
                 # densification
                 if iteration > opt.update_from and iteration % opt.update_interval == 0:
                     gaussians.adjust_anchor(check_interval=opt.update_interval, success_threshold=opt.success_threshold, grad_threshold=opt.densify_grad_threshold, min_opacity=opt.min_opacity)
-                # --- 动态 densification based on high error regions ---
-                    trigger_densification = False
-
-                    # 1️⃣ 计算渲染误差图
-                    gt_image = viewpoint_cam.original_image.cuda()
-                    errormap = (image - gt_image).abs().mean(dim=0)  # HxW，每个像素 RGB 平均
-                    high_error_ratio = (errormap > 0.1).float().mean().item()  # 0.1 可调
-                    if high_error_ratio > 0.18:  # 高误差区域超过 20% 时触发
-                        trigger_densification = True
-
-                    # 2️⃣ 可选：训练误差下降缓慢触发
-                    if iteration > 1000:
-                        if 'prev_ema_loss' not in locals():
-                            prev_ema_loss = ema_loss_for_log
-                        loss_delta = abs(prev_ema_loss - ema_loss_for_log)
-                        if loss_delta < 1e-4:
-                            trigger_densification = True
-                        prev_ema_loss = ema_loss_for_log
-
-                    # 3️⃣ 执行 densification
-                    if trigger_densification:
+                if iteration >=5000 and iteration <=opt.update_until and iteration % 5000 == 0:
+               
                         stage_idx += 1
-                        logger.info(f"\n[ITER {iteration}] Performing multi-plane densification based on high-error regions.")
-
+                        logger.info(f"\n[ITER {iteration}] Performing multi-plane densification based on current view.")
+                        
+                        for i, group in enumerate(gaussians.optimizer.param_groups):
+                            param = group['params'][0]
+                            print(f"[Before adding] Group {i}: name={group.get('name','')} shape={param.shape}, requires_grad={param.requires_grad}")
+                                # 多平面生成 anchor
+                            #print("....depth的形状：",resample_cam.depth.shape)
                         new_xyz, new_features = MutiPlane_anchor_init(
                             monodepth=viewpoint_cam.depth,
                             xyz=gaussians._anchor,
                             view_camera=viewpoint_cam,
-                            plane_num=8,
-                            sample_size=16,
+                            plane_num=4,
+                            #sample_size=opt.sample_win_size,
+                            sample_size=8,
                             muti_mode="neighbor",
-                        )
-
+                            )
                         if new_xyz is not None and new_xyz.shape[0] > 0:
-                            gaussians.add_MultiPlane_anchor(new_xyzs=new_xyz, new_features=new_features)
+                            gaussians.add_MultiPlane_anchor(new_xyzs=new_xyz, new_features=new_features) 
+                        for i, group in enumerate(gaussians.optimizer.param_groups):
+                                param = group['params'][0]
+                                print(f"[Before adding] Group {i}: name={group.get('name','')} shape={param.shape}, requires_grad={param.requires_grad}")
 
+                           # 记录一下添加了多少点，方便调试
+                        logger.info(f"Added {new_xyz.shape[0]} new points from multi-plane densification.")
                         all_points = gaussians.get_anchor.detach().cpu().numpy()
                         colors = np.ones_like(all_points) * 0.7  # 默认灰色
+                        
                         stage_color = cmap[stage_idx % len(cmap)]
                         new_idx_start = all_points.shape[0] - new_xyz.shape[0]
                         new_idx_end = all_points.shape[0]
                         global_stage_indices.append((new_idx_start, new_idx_end))
                         colors[new_idx_start:new_idx_end] = stage_color
-
-                        # 保存 ply
+                        # 保存每阶段 ply
                         pcd = o3d.geometry.PointCloud()
                         pcd.points = o3d.utility.Vector3dVector(all_points)
                         pcd.colors = o3d.utility.Vector3dVector(colors)
                         o3d.io.write_point_cloud(os.path.join(save_dir, f"stage_{stage_idx:02d}_full.ply"), pcd)
                         logger.info(f"[Stage {stage_idx}] Saved full scene point cloud with new points highlighted")
-
                         visibility_filter = render_pkg["visibility_filter"]
                         visible_ratio = visibility_filter.sum().item() / visibility_filter.numel()
-                        print("visible_ratio--------------------------------触发",visible_ratio)   
+                        print("visible_ratio--------------------------------触发",visible_ratio)
+
+
+                # if iteration >= 1000 and iteration <= 3000 and iteration % 1000 == 0:
+                #     gaussians.prune_point_ours_small(num=args.prune_num1, std=args.prune_std1, planer_numer=8)
+                # elif iteration > 5000 and iteration % 2000 == 0 and iteration < opt.update_until - 2000:
+                #     gaussians.prune_point_ours_small(num=args.prune_num2, std=args.prune_std2, planer_numer=8)
+
+
+                       # if iteration > 12000 and visible_ratio < 0.6: # 通过可见性触发,尝试解决剪枝过快的问题
+                            #print("visible_ratio--------------------------------触发",visible_ratio)
+                        
+                       # gaussians.prune_point_ours_small(num=args.prune_num1, std=args.prune_std1, planer_numer=4)
+                        # elif iteration >=25000 and iteration % 1000 == 0 and iteration < opt.update_until - 2000:
+                        #     gaussians.prune_point_ours_small(num=args.prune_num2, std=args.prune_std2, planer_numer=4)       
             elif iteration == opt.update_until:
                 del gaussians.opacity_accum
                 del gaussians.offset_gradient_accum
@@ -297,6 +323,12 @@ def training(dataset, opt, pipe, dataset_name, testing_iterations, saving_iterat
                 Gaussian_mask = np.zeros(gaussians.get_anchor.shape[0])
                 masks = []
                 val_cams = []
+                
+                # 视图选择 (假设 viewpoint_stack 可用)
+                # 这是旧的版本获取视角
+                # for num in range(5):
+                #     idx = randint(0, len(viewpoint_stack) - 1)
+                #     val_cams.append(viewpoint_stack[idx])
                 #  new Version 获取视角 # 提升Gaussian_mask的稳定性
                 train_cams = scene.getTrainCameras()
                 val_cams = [train_cams[randint(0, len(train_cams)-1)] for _ in range(5)] 
@@ -654,8 +686,8 @@ if __name__ == "__main__":
     # parser.add_argument("--save_iterations", nargs="+", type=int, default=[3_000, 7_000, 30_000])
     parser.add_argument("--test_iterations", nargs="+", type=int, default=[30_000])
     parser.add_argument("--save_iterations", nargs="+", type=int, default=[30_000])
-    parser.add_argument("--sample_iterations", nargs="+", type=int, default=[1000, 9000, 13000])
-    #parser.add_argument("--sample_iterations", nargs="+", type=int, default=[1000, 13000, 20000])
+   # parser.add_argument("--sample_iterations", nargs="+", type=int, default=[1000, 9000, 13000])
+    parser.add_argument("--sample_iterations", nargs="+", type=int, default=[1000, 13000, 20000])
 #     parser.add_argument(
 #     "--sample_iterations",
 #     nargs="+",

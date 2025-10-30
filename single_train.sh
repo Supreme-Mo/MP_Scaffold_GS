@@ -1,4 +1,4 @@
-scene='tnt/Truck'
+scene='tnt/train'
 exp_name='baseline'
 voxel_size=0.01
 update_init_factor=16
