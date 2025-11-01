@@ -93,22 +93,52 @@ def training(dataset, opt, pipe, dataset_name, testing_iterations, saving_iterat
     #修改
     stage_idx = 0 
     first_iter = 0
+    viewpoint_stack = None
     tb_writer = prepare_output_and_logger(dataset)
     gaussians = GaussianModel(dataset.feat_dim, dataset.n_offsets, dataset.voxel_size, dataset.update_depth, dataset.update_init_factor, dataset.update_hierachy_factor, dataset.use_feat_bank, 
                               dataset.appearance_dim, dataset.ratio, dataset.add_opacity_dist, dataset.add_cov_dist, dataset.add_color_dist)
     scene = Scene(dataset, gaussians, ply_path=ply_path, shuffle=False)
+    scale = 1
+    save_dir = os.path.join(args.model_path, "debug_dense_points")
+    os.makedirs(save_dir, exist_ok=True)
+    if not viewpoint_stack:
+        viewpoint_stack = scene.getTrainCameras(scale).copy()[:]
+
+    resample_num = 2
+
+    for num in range(resample_num):
+        idx = randint(0, len(viewpoint_stack) - 1)
+        resample_cam = viewpoint_stack[idx]
+
+        xyz = gaussians.get_anchor
+        monodepth = resample_cam.depth
+        init_xyz, init_features = MutiPlane_anchor_init(monodepth, xyz, resample_cam, plane_num=16,
+                                                 sample_size=20, muti_mode="neighbor",
+                                                 itera_num=num)
+        gaussians.add_MultiPlane_init(new_xyzs=init_xyz, new_features=init_features)
+        stage_idx+=1
+
+
+        all_points = init_xyz.detach().cpu().numpy()
+        colors = np.ones_like(all_points) * 0.7  # 默认灰色
+        stage_color = cmap[stage_idx % len(cmap)]
+        new_idx_start = all_points.shape[0] - init_xyz.shape[0]
+        new_idx_end = all_points.shape[0]
+        global_stage_indices.append((new_idx_start, new_idx_end))
+        colors[new_idx_start:new_idx_end] = stage_color
+
+        # 保存 ply
+        pcd = o3d.geometry.PointCloud()
+        pcd.points = o3d.utility.Vector3dVector(all_points)
+        pcd.colors = o3d.utility.Vector3dVector(colors)
+        o3d.io.write_point_cloud(os.path.join(save_dir, f"stage_{stage_idx:02d}_full.ply"), pcd)
+        logger.info(f"[Stage {stage_idx}] Saved full scene point cloud with new points highlighted") 
+
     gaussians.training_setup(opt) 
     if checkpoint:
         (model_params, first_iter) = torch.load(checkpoint)
         gaussians.restore(model_params, opt)
-#修改
-    viewpoint_stack = scene.getTrainCameras().copy()
-    # resample_num = 2
-    # for num in range(resample_num):
-    #     idx = randint(0, len(viewpoint_stack) - 1)
-    #     resample_cam = viewpoint_stack[idx]
 
-    #    
     iter_start = torch.cuda.Event(enable_timing = True)
     iter_end = torch.cuda.Event(enable_timing = True)
     print("anchor.........",gaussians.get_anchor.shape[0])
@@ -116,8 +146,7 @@ def training(dataset, opt, pipe, dataset_name, testing_iterations, saving_iterat
     ema_loss_for_log = 0.0
     progress_bar = tqdm(range(first_iter, opt.iterations), desc="Training progress")
     first_iter += 1
-    save_dir = os.path.join(args.model_path, "debug_dense_points")
-    os.makedirs(save_dir, exist_ok=True)
+  
     for iteration in range(first_iter, opt.iterations + 1):        
         # network gui not available in scaffold-gs yet
         if network_gui.conn == None:
@@ -229,60 +258,7 @@ def training(dataset, opt, pipe, dataset_name, testing_iterations, saving_iterat
                 # densification
                 if iteration > opt.update_from and iteration % opt.update_interval == 0:
                     gaussians.adjust_anchor(check_interval=opt.update_interval, success_threshold=opt.success_threshold, grad_threshold=opt.densify_grad_threshold, min_opacity=opt.min_opacity)
-                # --- 动态 densification based on high error regions ---
-                    trigger_densification = False
-
-                    # 1️⃣ 计算渲染误差图
-                    gt_image = viewpoint_cam.original_image.cuda()
-                    errormap = (image - gt_image).abs().mean(dim=0)  # HxW，每个像素 RGB 平均
-                    high_error_ratio = (errormap > 0.1).float().mean().item()  # 0.1 可调
-                    if high_error_ratio > 0.2:  # 高误差区域超过 20% 时触发
-                        trigger_densification = True
-
-                    # 2️⃣ 可选：训练误差下降缓慢触发
-                    if iteration > 1000:
-                        if 'prev_ema_loss' not in locals():
-                            prev_ema_loss = ema_loss_for_log
-                        loss_delta = abs(prev_ema_loss - ema_loss_for_log)
-                        if loss_delta < 1e-4:
-                            trigger_densification = True
-                        prev_ema_loss = ema_loss_for_log
-
-                    # 3️⃣ 执行 densification
-                    if trigger_densification:
-                        stage_idx += 1
-                        logger.info(f"\n[ITER {iteration}] Performing multi-plane densification based on high-error regions.")
-
-                        new_xyz, new_features = MutiPlane_anchor_init(
-                            monodepth=viewpoint_cam.depth,
-                            xyz=gaussians._anchor,
-                            view_camera=viewpoint_cam,
-                            plane_num=4,
-                            sample_size=8,
-                            muti_mode="neighbor",
-                        )
-
-                        if new_xyz is not None and new_xyz.shape[0] > 0:
-                            gaussians.add_MultiPlane_anchor(new_xyzs=new_xyz, new_features=new_features)
-
-                        all_points = gaussians.get_anchor.detach().cpu().numpy()
-                        colors = np.ones_like(all_points) * 0.7  # 默认灰色
-                        stage_color = cmap[stage_idx % len(cmap)]
-                        new_idx_start = all_points.shape[0] - new_xyz.shape[0]
-                        new_idx_end = all_points.shape[0]
-                        global_stage_indices.append((new_idx_start, new_idx_end))
-                        colors[new_idx_start:new_idx_end] = stage_color
-
-                        # 保存 ply
-                        pcd = o3d.geometry.PointCloud()
-                        pcd.points = o3d.utility.Vector3dVector(all_points)
-                        pcd.colors = o3d.utility.Vector3dVector(colors)
-                        o3d.io.write_point_cloud(os.path.join(save_dir, f"stage_{stage_idx:02d}_full.ply"), pcd)
-                        logger.info(f"[Stage {stage_idx}] Saved full scene point cloud with new points highlighted")
-
-                        visibility_filter = render_pkg["visibility_filter"]
-                        visible_ratio = visibility_filter.sum().item() / visibility_filter.numel()
-                        print("visible_ratio--------------------------------触发",visible_ratio)   
+              
             elif iteration == opt.update_until:
                 del gaussians.opacity_accum
                 del gaussians.offset_gradient_accum
@@ -290,68 +266,68 @@ def training(dataset, opt, pipe, dataset_name, testing_iterations, saving_iterat
                 torch.cuda.empty_cache()
                     
             # Optimizer step
-            if iteration in args.sample_iterations:
-                print("resample !!  ", iteration)
+            # if iteration in args.sample_iterations:
+            #     print("resample !!  ", iteration)
                 
-                # 1. 初始化 Gaussian_mask (适配 Scaffold-GS: get_anchor 替代 get_xyz)
-                Gaussian_mask = np.zeros(gaussians.get_anchor.shape[0])
-                masks = []
-                val_cams = []
-                #  new Version 获取视角 # 提升Gaussian_mask的稳定性
-                train_cams = scene.getTrainCameras()
-                val_cams = [train_cams[randint(0, len(train_cams)-1)] for _ in range(5)] 
-                # 2. 渲染、误差计算和累积
-                for index, viewpoint_cam in enumerate(val_cams):
-                    # ⚠️ 注意: 在 Scaffold-GS 中, render 调用前通常需要 prefilter_voxel 步骤, 此处保留原函数调用。
-                    render_pkg = render(viewpoint_cam, gaussians, pipe, background)
-                    image = render_pkg["render"]
-                    render_depth = render_pkg["depth"]
+            #     # 1. 初始化 Gaussian_mask (适配 Scaffold-GS: get_anchor 替代 get_xyz)
+            #     Gaussian_mask = np.zeros(gaussians.get_anchor.shape[0])
+            #     masks = []
+            #     val_cams = []
+            #     #  new Version 获取视角 # 提升Gaussian_mask的稳定性
+            #     train_cams = scene.getTrainCameras()
+            #     val_cams = [train_cams[randint(0, len(train_cams)-1)] for _ in range(5)] 
+            #     # 2. 渲染、误差计算和累积
+            #     for index, viewpoint_cam in enumerate(val_cams):
+            #         # ⚠️ 注意: 在 Scaffold-GS 中, render 调用前通常需要 prefilter_voxel 步骤, 此处保留原函数调用。
+            #         render_pkg = render(viewpoint_cam, gaussians, pipe, background)
+            #         image = render_pkg["render"]
+            #         render_depth = render_pkg["depth"]
 
-                    # 深度图预处理
-                    mono_depth = viewpoint_cam.depth
-                    if mono_depth.shape != render_depth.shape:
-                        # 假设 cv2 已导入
-                        mono_depth = cv2.resize(mono_depth, [render_depth.shape[2], render_depth.shape[1]])
+            #         # 深度图预处理
+            #         mono_depth = viewpoint_cam.depth
+            #         if mono_depth.shape != render_depth.shape:
+            #             # 假设 cv2 已导入
+            #             mono_depth = cv2.resize(mono_depth, [render_depth.shape[2], render_depth.shape[1]])
 
-                    # 结合深度误差和图像误差
-                    mask = get_depth_mask(render_depth.detach().cpu().numpy()[0], mono_depth)
-                    error_mask = error_map(image, viewpoint_cam.original_image, static_factor=0.2)
-                    mask[error_mask.detach().cpu().numpy() != 0] = 1
-                    masks.append(mask)
+            #         # 结合深度误差和图像误差
+            #         mask = get_depth_mask(render_depth.detach().cpu().numpy()[0], mono_depth)
+            #         error_mask = error_map(image, viewpoint_cam.original_image, static_factor=0.2)
+            #         mask[error_mask.detach().cpu().numpy() != 0] = 1
+            #         masks.append(mask)
                     
-                    # 累积多视图误差 (适配 Scaffold-GS: get_anchor 替代 get_xyz)
-                    Gaussian_mask_t = get_add_point(viewpoint_cam, gaussians.get_anchor, mask)
-                    Gaussian_mask = Gaussian_mask + Gaussian_mask_t
+            #         # 累积多视图误差 (适配 Scaffold-GS: get_anchor 替代 get_xyz)
+            #         Gaussian_mask_t = get_add_point(viewpoint_cam, gaussians.get_anchor, mask)
+            #         Gaussian_mask = Gaussian_mask + Gaussian_mask_t
 
-                # 3. 确定需要重置位置的 Anchor 索引
-                # 仅保留在至少两次视图中被标记为错误的 Anchor 
-                Gaussian_mask[Gaussian_mask < 2] = 0
+            #     # 3. 确定需要重置位置的 Anchor 索引
+            #     # 仅保留在至少两次视图中被标记为错误的 Anchor 
+            #     Gaussian_mask[Gaussian_mask < 2] = 0
                 
-                # 提取索引 (NumPy 数组)
-                decomp_mask_indices = np.where(Gaussian_mask != 0)[0]
+            #     # 提取索引 (NumPy 数组)
+            #     decomp_mask_indices = np.where(Gaussian_mask != 0)[0]
                 
-                if len(decomp_mask_indices) > 0:
-                    # 转换为 PyTorch 索引张量
-                    decomp_mask = torch.tensor(decomp_mask_indices, dtype=torch.long, device='cuda')
+            #     if len(decomp_mask_indices) > 0:
+            #         # 转换为 PyTorch 索引张量
+            #         decomp_mask = torch.tensor(decomp_mask_indices, dtype=torch.long, device='cuda')
                     
-                    # --- 移除复杂的分裂/克隆循环 ---
-                    # for i, view in enumerate(val_cams): ... gaussian_decomp(...) (此步骤被移除)
+            #         # --- 移除复杂的分裂/克隆循环 ---
+            #         # for i, view in enumerate(val_cams): ... gaussian_decomp(...) (此步骤被移除)
 
-                    # 4. Anchor 位置重置 (Repositioning)
-                    # 获取需要重置的 Anchor 坐标 (适配 Scaffold-GS: get_anchor 替代 get_xyz)
-                    xyzs = gaussians.get_anchor[decomp_mask] 
-                    max_depth = gaussians.get_anchor.max() * 0.95
-                    win_sizes = [1, 7, 21]
+            #         # 4. Anchor 位置重置 (Repositioning)
+            #         # 获取需要重置的 Anchor 坐标 (适配 Scaffold-GS: get_anchor 替代 get_xyz)
+            #         xyzs = gaussians.get_anchor[decomp_mask] 
+            #         max_depth = gaussians.get_anchor.max() * 0.95
+            #         win_sizes = [1, 7, 21]
                     
-                    # 计算新的最佳位置 (xyz_vector)
-                    xyz_vector = get_vector(val_cams, xyzs, max_depth, split_num=5, win_sizes=win_sizes)
-                    # 初始化全 False
-                    mask = torch.zeros(gaussians.get_anchor.shape[0], dtype=torch.bool, device='cuda')
-                    print("重置的 anchor 数量: ", len(decomp_mask_indices))
-                    # 将需要重置的 anchor 对应位置置为 True
-                    mask[decomp_mask_indices] = True
-                    # 应用重置 (适配 Scaffold-GS: reset_anchor 替代 reset_xyz)
-                    gaussians.reset_anchor(xyz_vector, mask)
+            #         # 计算新的最佳位置 (xyz_vector)
+            #         xyz_vector = get_vector(val_cams, xyzs, max_depth, split_num=5, win_sizes=win_sizes)
+            #         # 初始化全 False
+            #         mask = torch.zeros(gaussians.get_anchor.shape[0], dtype=torch.bool, device='cuda')
+            #         print("重置的 anchor 数量: ", len(decomp_mask_indices))
+            #         # 将需要重置的 anchor 对应位置置为 True
+            #         mask[decomp_mask_indices] = True
+            #         # 应用重置 (适配 Scaffold-GS: reset_anchor 替代 reset_xyz)
+                  #  gaussians.reset_anchor(xyz_vector, mask)
     
             if iteration < opt.iterations:
                 gaussians.optimizer.step()
@@ -440,7 +416,7 @@ def training_report(tb_writer, dataset_name, iteration, Ll1, loss, l1_loss, elap
 
                     l1_test += l1_loss(image, gt_image).mean().double()
                     psnr_test += psnr(image, gt_image).mean().double()
-
+ 
                 
                 
                 psnr_test /= len(config['cameras'])
@@ -458,7 +434,7 @@ def training_report(tb_writer, dataset_name, iteration, Ll1, loss, l1_loss, elap
             # tb_writer.add_histogram(f'{dataset_name}/'+"scene/opacity_histogram", scene.gaussians.get_opacity, iteration)
             tb_writer.add_scalar(f'{dataset_name}/'+'total_points', scene.gaussians.get_anchor.shape[0], iteration)
         torch.cuda.empty_cache()
-
+  
         scene.gaussians.train()
 
 def render_set(model_path, name, iteration, views, gaussians, pipeline, background):

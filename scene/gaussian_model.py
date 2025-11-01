@@ -1082,12 +1082,7 @@ class GaussianModel:
         # self.offset_gradient_accum = _expand_tensor(getattr(self, "offset_gradient_accum", None), total_anchor * getattr(self, "n_offsets", 1))
         # self.offset_denom = _expand_tensor(getattr(self, "offset_denom", None), total_anchor * getattr(self, "n_offsets", 1))
         # print("anchors number:", self._anchor.shape[0])
-    def  add_MultiPlane_init(self, new_xyzs, new_features=None):
-        """
-        为多平面初始化增加 anchor 点，同时保证新增参数被 optimizer 跟踪。
-        new_xyzs: 新增点 (N,3) Tensor
-        new_features: 新增特征 (N,F) Tensor，可为 None
-        """
+    def add_MultiPlane_init(self, new_xyzs, new_features=None):
         if new_xyzs is None or new_xyzs.shape[0] == 0:
             return
 
@@ -1117,49 +1112,34 @@ class GaussianModel:
 
         # --- 2. 交给框架处理拼接和 optimizer ---
         if hasattr(self, "optimizer") and self.optimizer is not None:
-            self.cat_tensors_to_optimizer(d)
-         # --- 1. 扩展 anchor ---
-        if hasattr(self, "_anchor") and self._anchor is not None:
-            anchor_data = torch.cat([self._anchor.detach(), new_xyzs], dim=0)
-        else:
-            anchor_data = new_xyzs.detach()
-        self._anchor = nn.Parameter(anchor_data.requires_grad_(True))
+            optimizable_tensors = self.cat_tensors_to_optimizer(d)
+            
+            # --- 3. 用优化器返回的新参数更新模型属性 ---
+            self._anchor = optimizable_tensors["anchor"]
+            if "anchor_feat" in optimizable_tensors:
+                self._anchor_feat = optimizable_tensors["anchor_feat"]
+            if "offset" in optimizable_tensors:
+                self._offset = optimizable_tensors["offset"]
+            if "scaling" in optimizable_tensors:
+                self._scaling = optimizable_tensors["scaling"]
+            if "rotation" in optimizable_tensors:
+                self._rotation = optimizable_tensors["rotation"]
+            if "opacity" in optimizable_tensors:
+                self._opacity = optimizable_tensors["opacity"]
+        total_anchor = self._anchor.shape[0]
 
-        # --- 2. 扩展 anchor_feat ---
-        if new_features is not None:
-            if hasattr(self, "_anchor_feat") and self._anchor_feat is not None:
-                anchor_feat_data = torch.cat([self._anchor_feat.detach(), new_features], dim=0)
-            else:
-                anchor_feat_data = new_features.detach()
-            self._anchor_feat = nn.Parameter(anchor_feat_data.requires_grad_(True))
+        device = self._anchor.device
+        self.opacity_accum = torch.zeros((total_anchor, 1), device=device)
+        self.anchor_demon = torch.zeros((total_anchor, 1), device=device)
+        self.offset_gradient_accum = torch.zeros((total_anchor * getattr(self, "n_offsets", 1), 3), device=device)
+        self.offset_denom = torch.zeros((total_anchor * getattr(self, "n_offsets", 1), 3), device=device)
 
-        # --- 3. 扩展 offset ---
-        new_offsets = torch.zeros((new_n, self.n_offsets, 3), device=device)
-        if hasattr(self, "_offset") and self._offset is not None:
-            offset_data = torch.cat([self._offset.detach(), new_offsets], dim=0)
-        else:
-            offset_data = new_offsets
-        self._offset = nn.Parameter(offset_data.requires_grad_(True))
 
-        # --- 4. 扩展 scaling ---
-        scaling_dim = getattr(self, "_scaling_dim", 6)
-        default_scaling = torch.ones((new_n, scaling_dim), device=device) * getattr(self, "voxel_size", 1.0)
-        if hasattr(self, "_scaling") and self._scaling is not None:
-            scaling_data = torch.cat([self._scaling.detach(), default_scaling], dim=0)
-        else:
-            scaling_data = default_scaling
-        self._scaling = nn.Parameter(scaling_data.requires_grad_(True))
 
-        # --- 5. 扩展 rotation ---
-        new_rots = torch.zeros((new_n, 4), device=device)
-        new_rots[:, 0] = 1.0  # identity quaternion
-        if hasattr(self, "_rotation") and self._rotation is not None:
-            rot_data = torch.cat([self._rotation.detach(), new_rots], dim=0)
-        else:
-            rot_data = new_rots
-        # 保留原来的 requires_grad 状态
-        requires_grad_rot = getattr(self._rotation, 'requires_grad', False)
-        self._rotation = nn.Parameter(rot_data.requires_grad_(requires_grad_rot))
+
+
+
+
     def add_MultiPlane_anchor(self, new_xyzs, new_features=None):
         if new_xyzs is None or new_xyzs.shape[0] == 0:
             return

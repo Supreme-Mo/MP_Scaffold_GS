@@ -8,7 +8,8 @@
 #
 # For inquiries contact  george.drettakis@inria.fr
 #
-
+import torch
+import torch.nn.functional as F
 from scene.cameras import Camera
 import numpy as np
 from utils.general_utils import PILtoTorch
@@ -42,13 +43,24 @@ def loadCam(args, id, cam_info, resolution_scale):
 
     gt_image = resized_image_rgb[:3, ...]
     loaded_mask = None
-
+    # ------------------------
+    # 缩放深度图
+    # ------------------------
+    depth_resized = None
+    depth_interp='bilinear'
+    if hasattr(cam_info, 'depth') and cam_info.depth is not None:
+        depth = torch.tensor(cam_info.depth, dtype=torch.float32).unsqueeze(0).unsqueeze(0)  # [1,1,H,W]
+        # 注意这里的目标尺寸是 (height, width)
+        depth_resized = F.interpolate(
+            depth, size=(resolution[1], resolution[0]),
+            mode=depth_interp, align_corners=False if depth_interp == 'bilinear' else None
+        ).squeeze().cpu().numpy()   
     # print(f'gt_image: {gt_image.shape}')
     if resized_image_rgb.shape[1] == 4:
         loaded_mask = resized_image_rgb[3:4, ...]
 
     return Camera(colmap_id=cam_info.uid, R=cam_info.R, T=cam_info.T, 
-                  FoVx=cam_info.FovX, FoVy=cam_info.FovY,depth=cam_info.depth,focal=cam_info.focal,
+                  FoVx=cam_info.FovX, FoVy=cam_info.FovY,depth=depth_resized,focal=cam_info.focal,
                   image=gt_image, gt_alpha_mask=loaded_mask,
                   image_name=cam_info.image_name, uid=id, data_device=args.data_device)
 
