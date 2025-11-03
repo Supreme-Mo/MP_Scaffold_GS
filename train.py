@@ -258,13 +258,25 @@ def training(dataset, opt, pipe, dataset_name, testing_iterations, saving_iterat
                 # densification
                 if iteration > opt.update_from and iteration % opt.update_interval == 0:
                     gaussians.adjust_anchor(check_interval=opt.update_interval, success_threshold=opt.success_threshold, grad_threshold=opt.densify_grad_threshold, min_opacity=opt.min_opacity)
-              
+
             elif iteration == opt.update_until:
                 del gaussians.opacity_accum
                 del gaussians.offset_gradient_accum
                 del gaussians.offset_denom
                 torch.cuda.empty_cache()
-                    
+
+            try:
+                # 阶段1：1000..3000，每1000步剪一次
+                if iteration >= 1000 and iteration <= 3000 and iteration % 1000 == 0:
+                    logger.info(f"[ITER {iteration}] Pruning small points (stage1): num={args.prune_num1}, std={args.prune_std1}")
+                    gaussians.prune_point_ours_small(num=args.prune_num1, std=args.prune_std1, planer_numer=16)
+                # 阶段2：>3000，每2000步剪一次，且不超过 densify 时期 (使用 opt.update_until - 2000 作为上限)
+                elif iteration > 3000 and iteration % 2000 == 0 and iteration < (opt.update_until - 2000):
+                    logger.info(f"[ITER {iteration}] Pruning small points (stage2): num={args.prune_num2}, std={args.prune_std2}")
+                    gaussians.prune_point_ours_small(num=args.prune_num2, std=args.prune_std2, planer_numer=16)
+            except Exception as e:
+                # 剪枝可能会因为某些状态（比如点数太少）抛错，记录日志并继续训练
+                logger.warning(f"Pruning failed at iteration {iteration}: {e}")        
             # Optimizer step
             # if iteration in args.sample_iterations:
             #     print("resample !!  ", iteration)
