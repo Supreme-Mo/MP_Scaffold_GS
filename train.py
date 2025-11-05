@@ -106,6 +106,13 @@ def training(dataset, opt, pipe, dataset_name, testing_iterations, saving_iterat
 
     resample_num = 2
 
+    orig_xyz = gaussians.get_anchor.detach().cpu().numpy()
+    orig_colors = np.ones_like(orig_xyz) * 0.7  # 默认灰色
+    pcd = o3d.geometry.PointCloud()
+    pcd.points = o3d.utility.Vector3dVector(orig_xyz)
+    pcd.colors = o3d.utility.Vector3dVector(orig_colors)
+    o3d.io.write_point_cloud(os.path.join(save_dir, "stage_00_original.ply"), pcd)
+    logger.info("Saved original point cloud before any MultiPlane init")
     for num in range(resample_num):
         idx = randint(0, len(viewpoint_stack) - 1)
         resample_cam = viewpoint_stack[idx]
