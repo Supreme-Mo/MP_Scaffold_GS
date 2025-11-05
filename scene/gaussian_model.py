@@ -1571,49 +1571,49 @@ class GaussianModel:
             print("masssss:",mask_point_temp.sum().item(), "/", mask_point_temp.shape[0])
             torch.cuda.empty_cache()
 # 修改
-    def reset_anchor(self, new_xyz, mask):
-        """
-        Reset the positions of selected anchors in Scaffold-GS.
+    # def reset_anchor(self, new_xyz, mask):
+    #     """
+    #     Reset the positions of selected anchors in Scaffold-GS.
         
-        Args:
-            new_xyz (torch.Tensor): 新的 anchor 坐标 [N,3]，对应 mask 为 True 的部分。
-            mask (torch.BoolTensor): 长度为 self._anchor.shape[0] 的布尔 mask，True 表示需要重置的 anchor。
-        """
-        # --- 检查 mask 长度 ---
-        num_anchor = self._anchor.shape[0]
-        if mask.shape[0] != num_anchor:
-            raise ValueError(f"mask length {mask.shape[0]} != number of anchors {num_anchor}")
+    #     Args:
+    #         new_xyz (torch.Tensor): 新的 anchor 坐标 [N,3]，对应 mask 为 True 的部分。
+    #         mask (torch.BoolTensor): 长度为 self._anchor.shape[0] 的布尔 mask，True 表示需要重置的 anchor。
+    #     """
+    #     # --- 检查 mask 长度 ---
+    #     num_anchor = self._anchor.shape[0]
+    #     if mask.shape[0] != num_anchor:
+    #         raise ValueError(f"mask length {mask.shape[0]} != number of anchors {num_anchor}")
 
-        with torch.no_grad():
-            # 1. 保存旧的 anchor，用于插值
-            old_xyz = self._anchor.clone()
+    #     with torch.no_grad():
+    #         # 1. 保存旧的 anchor，用于插值
+    #         old_xyz = self._anchor.clone()
 
-            # 2. 重置 mask 对应的 anchor
-            self._anchor[mask] = new_xyz
+    #         # 2. 重置 mask 对应的 anchor
+    #         self._anchor[mask] = new_xyz
 
-            # 3. 找到 mask 部分 anchor 对应的最近非 mask anchor 索引，用于属性插值
-            dists = torch.cdist(new_xyz, old_xyz[~mask])  # [N_mask, N_nonmask]
-            nn_idx = torch.argmin(dists, dim=1)          # 最近邻索引
+    #         # 3. 找到 mask 部分 anchor 对应的最近非 mask anchor 索引，用于属性插值
+    #         dists = torch.cdist(new_xyz, old_xyz[~mask])  # [N_mask, N_nonmask]
+    #         nn_idx = torch.argmin(dists, dim=1)          # 最近邻索引
 
-            # 4. 插值属性
-            self._scaling[mask] = self._scaling[~mask][nn_idx]
-            self._opacity[mask] = self._opacity[~mask][nn_idx]
-            self._rotation[mask] = self._rotation[~mask][nn_idx]
-            if hasattr(self, "_anchor_feat"):
-                self._anchor_feat[mask] = self._anchor_feat[~mask][nn_idx]
+    #         # 4. 插值属性
+    #         self._scaling[mask] = self._scaling[~mask][nn_idx]
+    #         self._opacity[mask] = self._opacity[~mask][nn_idx]
+    #         self._rotation[mask] = self._rotation[~mask][nn_idx]
+    #         if hasattr(self, "_anchor_feat"):
+    #             self._anchor_feat[mask] = self._anchor_feat[~mask][nn_idx]
 
-            # 5. 清空 mask 部分的梯度
-            if  hasattr(self, "optimizer"):
-                if self._anchor.grad is not None:
-                    self._anchor.grad[mask] = 0
-                if hasattr(self, "_scaling") and self._scaling.grad is not None:
-                    self._scaling.grad[mask] = 0
-                if hasattr(self, "_opacity") and self._opacity.grad is not None:
-                    self._opacity.grad[mask] = 0
-                if hasattr(self, "_rotation") and self._rotation.grad is not None:
-                    self._rotation.grad[mask] = 0
-                if hasattr(self, "_anchor_feat") and self._anchor_feat.grad is not None:
-                    self._anchor_feat.grad[mask] = 0
+    #         # 5. 清空 mask 部分的梯度
+    #         if  hasattr(self, "optimizer"):
+    #             if self._anchor.grad is not None:
+    #                 self._anchor.grad[mask] = 0
+    #             if hasattr(self, "_scaling") and self._scaling.grad is not None:
+    #                 self._scaling.grad[mask] = 0
+    #             if hasattr(self, "_opacity") and self._opacity.grad is not None:
+    #                 self._opacity.grad[mask] = 0
+    #             if hasattr(self, "_rotation") and self._rotation.grad is not None:
+    #                 self._rotation.grad[mask] = 0
+    #             if hasattr(self, "_anchor_feat") and self._anchor_feat.grad is not None:
+    #                 self._anchor_feat.grad[mask] = 0
 
 
 
@@ -1656,3 +1656,53 @@ class GaussianModel:
         #             del self.optimizer.state[old_param]
         #             self.optimizer.state[self._anchor] = new_state
         #         break
+    def reset_anchor(self, new_xyz, mask, batch_size=1024):
+        """
+        Reset the positions of selected anchors in Scaffold-GS safely with large number of anchors.
+
+        Args:
+            new_xyz (torch.Tensor): 新的 anchor 坐标 [N_mask, 3]，对应 mask 为 True 的部分。
+            mask (torch.BoolTensor): 长度为 self._anchor.shape[0] 的布尔 mask，True 表示需要重置的 anchor。
+            batch_size (int): 分批计算最近邻的大小，避免显存爆炸。
+        """
+        num_anchor = self._anchor.shape[0]
+        if mask.shape[0] != num_anchor:
+            raise ValueError(f"mask length {mask.shape[0]} != number of anchors {num_anchor}")
+
+        with torch.no_grad():
+            # 1. 保存旧 anchor
+            old_xyz = self._anchor.clone()
+
+            # 2. 重置 mask 对应的 anchor
+            self._anchor[mask] = new_xyz
+
+            # 3. 找到 mask 部分 anchor 对应的最近非 mask anchor 索引，分批计算
+            nn_idx_list = []
+            non_mask_xyz = old_xyz[~mask]  # [N_nonmask, 3]
+            for start in range(0, new_xyz.shape[0], batch_size):
+                end = start + batch_size
+                batch = new_xyz[start:end]  # [B, 3]
+                dists = torch.cdist(batch, non_mask_xyz)  # [B, N_nonmask]
+                nn_idx = torch.argmin(dists, dim=1)
+                nn_idx_list.append(nn_idx)
+            nn_idx = torch.cat(nn_idx_list, dim=0)
+
+            # 4. 属性插值
+            self._scaling[mask] = self._scaling[~mask][nn_idx]
+            self._opacity[mask] = self._opacity[~mask][nn_idx]
+            self._rotation[mask] = self._rotation[~mask][nn_idx]
+            if hasattr(self, "_anchor_feat"):
+                self._anchor_feat[mask] = self._anchor_feat[~mask][nn_idx]
+
+            # 5. 清空 mask 部分的梯度
+            if hasattr(self, "optimizer"):
+                if self._anchor.grad is not None:
+                    self._anchor.grad[mask] = 0
+                if hasattr(self, "_scaling") and self._scaling.grad is not None:
+                    self._scaling.grad[mask] = 0
+                if hasattr(self, "_opacity") and self._opacity.grad is not None:
+                    self._opacity.grad[mask] = 0
+                if hasattr(self, "_rotation") and self._rotation.grad is not None:
+                    self._rotation.grad[mask] = 0
+                if hasattr(self, "_anchor_feat") and self._anchor_feat.grad is not None:
+                    self._anchor_feat.grad[mask] = 0
