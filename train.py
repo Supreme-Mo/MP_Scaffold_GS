@@ -210,11 +210,11 @@ def training(dataset, opt, pipe, dataset_name, testing_iterations, saving_iterat
 
             # 前期权重大，后期权重小
             if iteration < 3000:
+                lambda_normal = 0.1
+                lambda_normal_local = 0.01
+            else:
                 lambda_normal = 0.01
                 lambda_normal_local = 0.001
-            else:
-                lambda_normal = 0.0001
-                lambda_normal_local = 0.0001
 
             losses['normal'] = cos_loss(d2n, normal)
             losses['local_normal'] = get_normal_smoothness(normal, gt_image, k_size=3)
@@ -230,7 +230,7 @@ def training(dataset, opt, pipe, dataset_name, testing_iterations, saving_iterat
         loss = sum([loss_weights[k] * v for k, v in losses.items()])
         loss.backward()
         #loss.backward(retain_graph=retain_grad)
-        iter_end.record()
+        iter_end.record()   
         with torch.no_grad():
         
             ema_loss_for_log = 0.4 * loss.item() + 0.6 * ema_loss_for_log
@@ -264,82 +264,71 @@ def training(dataset, opt, pipe, dataset_name, testing_iterations, saving_iterat
                 del gaussians.offset_gradient_accum
                 del gaussians.offset_denom
                 torch.cuda.empty_cache()
-
-            try:
-                # 阶段1：1000..3000，每1000步剪一次
-                if iteration >= 1000 and iteration <= 3000 and iteration % 1000 == 0:
-                    logger.info(f"[ITER {iteration}] Pruning small points (stage1): num={args.prune_num1}, std={args.prune_std1}")
-                    gaussians.prune_point_ours_small(num=args.prune_num1, std=args.prune_std1, planer_numer=16)
-                # 阶段2：>3000，每2000步剪一次，且不超过 densify 时期 (使用 opt.update_until - 2000 作为上限)
-                elif iteration > 3000 and iteration % 2000 == 0 and iteration < (opt.update_until - 2000):
-                    logger.info(f"[ITER {iteration}] Pruning small points (stage2): num={args.prune_num2}, std={args.prune_std2}")
-                    gaussians.prune_point_ours_small(num=args.prune_num2, std=args.prune_std2, planer_numer=16)
-            except Exception as e:
-                # 剪枝可能会因为某些状态（比如点数太少）抛错，记录日志并继续训练
-                logger.warning(f"Pruning failed at iteration {iteration}: {e}")        
+            
+                    
             # Optimizer step
-            # if iteration in args.sample_iterations:
-            #     print("resample !!  ", iteration)
+            if iteration in args.sample_iterations:
+                print("resample !!  ", iteration)
                 
-            #     # 1. 初始化 Gaussian_mask (适配 Scaffold-GS: get_anchor 替代 get_xyz)
-            #     Gaussian_mask = np.zeros(gaussians.get_anchor.shape[0])
-            #     masks = []
-            #     val_cams = []
-            #     #  new Version 获取视角 # 提升Gaussian_mask的稳定性
-            #     train_cams = scene.getTrainCameras()
-            #     val_cams = [train_cams[randint(0, len(train_cams)-1)] for _ in range(5)] 
-            #     # 2. 渲染、误差计算和累积
-            #     for index, viewpoint_cam in enumerate(val_cams):
-            #         # ⚠️ 注意: 在 Scaffold-GS 中, render 调用前通常需要 prefilter_voxel 步骤, 此处保留原函数调用。
-            #         render_pkg = render(viewpoint_cam, gaussians, pipe, background)
-            #         image = render_pkg["render"]
-            #         render_depth = render_pkg["depth"]
+                # 1. 初始化 Gaussian_mask (适配 Scaffold-GS: get_anchor 替代 get_xyz)
+                Gaussian_mask = np.zeros(gaussians.get_anchor.shape[0])
+                masks = []
+                val_cams = []
+                #  new Version 获取视角 # 提升Gaussian_mask的稳定性
+                train_cams = scene.getTrainCameras()
+                val_cams = [train_cams[randint(0, len(train_cams)-1)] for _ in range(5)] 
+                # 2. 渲染、误差计算和累积
+                for index, viewpoint_cam in enumerate(val_cams):
+                    # ⚠️ 注意: 在 Scaffold-GS 中, render 调用前通常需要 prefilter_voxel 步骤, 此处保留原函数调用。
+                    render_pkg = render(viewpoint_cam, gaussians, pipe, background)
+                    image = render_pkg["render"]
+                    render_depth = render_pkg["depth"]
 
-            #         # 深度图预处理
-            #         mono_depth = viewpoint_cam.depth
-            #         if mono_depth.shape != render_depth.shape:
-            #             # 假设 cv2 已导入
-            #             mono_depth = cv2.resize(mono_depth, [render_depth.shape[2], render_depth.shape[1]])
+                    # 深度图预处理
+                    mono_depth = viewpoint_cam.depth
+                    if mono_depth.shape != render_depth.shape:
+                        # 假设 cv2 已导入
+                        mono_depth = cv2.resize(mono_depth, [render_depth.shape[2], render_depth.shape[1]])
 
-            #         # 结合深度误差和图像误差
-            #         mask = get_depth_mask(render_depth.detach().cpu().numpy()[0], mono_depth)
-            #         error_mask = error_map(image, viewpoint_cam.original_image, static_factor=0.2)
-            #         mask[error_mask.detach().cpu().numpy() != 0] = 1
-            #         masks.append(mask)
+                    # 结合深度误差和图像误差
+                    mask = get_depth_mask(render_depth.detach().cpu().numpy()[0], mono_depth)
+                    error_mask = error_map(image, viewpoint_cam.original_image, static_factor=0.2)
+                    mask[error_mask.detach().cpu().numpy() != 0] = 1
+                    masks.append(mask)
                     
-            #         # 累积多视图误差 (适配 Scaffold-GS: get_anchor 替代 get_xyz)
-            #         Gaussian_mask_t = get_add_point(viewpoint_cam, gaussians.get_anchor, mask)
-            #         Gaussian_mask = Gaussian_mask + Gaussian_mask_t
+                    # 累积多视图误差 (适配 Scaffold-GS: get_anchor 替代 get_xyz)
+                    Gaussian_mask_t = get_add_point(viewpoint_cam, gaussians.get_anchor, mask)
+                    Gaussian_mask = Gaussian_mask + Gaussian_mask_t
 
-            #     # 3. 确定需要重置位置的 Anchor 索引
-            #     # 仅保留在至少两次视图中被标记为错误的 Anchor 
-            #     Gaussian_mask[Gaussian_mask < 2] = 0
+                # 3. 确定需要重置位置的 Anchor 索引
+                # 仅保留在至少两次视图中被标记为错误的 Anchor 
+                Gaussian_mask[Gaussian_mask < 2] = 0
                 
-            #     # 提取索引 (NumPy 数组)
-            #     decomp_mask_indices = np.where(Gaussian_mask != 0)[0]
+                # 提取索引 (NumPy 数组)
+                decomp_mask_indices = np.where(Gaussian_mask != 0)[0]
                 
-            #     if len(decomp_mask_indices) > 0:
-            #         # 转换为 PyTorch 索引张量
-            #         decomp_mask = torch.tensor(decomp_mask_indices, dtype=torch.long, device='cuda')
+                if len(decomp_mask_indices) > 0:
+                    # 转换为 PyTorch 索引张量
+                    decomp_mask = torch.tensor(decomp_mask_indices, dtype=torch.long, device='cuda')
                     
-            #         # --- 移除复杂的分裂/克隆循环 ---
-            #         # for i, view in enumerate(val_cams): ... gaussian_decomp(...) (此步骤被移除)
+                    # --- 移除复杂的分裂/克隆循环 ---
+                    # for i, view in enumerate(val_cams): ... gaussian_decomp(...) (此步骤被移除)
 
-            #         # 4. Anchor 位置重置 (Repositioning)
-            #         # 获取需要重置的 Anchor 坐标 (适配 Scaffold-GS: get_anchor 替代 get_xyz)
-            #         xyzs = gaussians.get_anchor[decomp_mask] 
-            #         max_depth = gaussians.get_anchor.max() * 0.95
-            #         win_sizes = [1, 7, 21]
+                    # 4. Anchor 位置重置 (Repositioning)
+                    # 获取需要重置的 Anchor 坐标 (适配 Scaffold-GS: get_anchor 替代 get_xyz)
+                    xyzs = gaussians.get_anchor[decomp_mask] 
+                    max_depth = gaussians.get_anchor.max() * 0.95
+                    win_sizes = [1, 7, 21]
                     
-            #         # 计算新的最佳位置 (xyz_vector)
-            #         xyz_vector = get_vector(val_cams, xyzs, max_depth, split_num=5, win_sizes=win_sizes)
-            #         # 初始化全 False
-            #         mask = torch.zeros(gaussians.get_anchor.shape[0], dtype=torch.bool, device='cuda')
-            #         print("重置的 anchor 数量: ", len(decomp_mask_indices))
-            #         # 将需要重置的 anchor 对应位置置为 True
-            #         mask[decomp_mask_indices] = True
-            #         # 应用重置 (适配 Scaffold-GS: reset_anchor 替代 reset_xyz)
-                  #  gaussians.reset_anchor(xyz_vector, mask)
+                    # 计算新的最佳位置 (xyz_vector)
+                    xyz_vector = get_vector(val_cams, xyzs, max_depth, split_num=5, win_sizes=win_sizes)
+                    # 初始化全 False
+                    mask = torch.zeros(gaussians.get_anchor.shape[0], dtype=torch.bool, device='cuda')
+                    print("重置的 anchor 数量: ", len(decomp_mask_indices))
+                    # 将需要重置的 anchor 对应位置置为 True
+                    mask[decomp_mask_indices] = True
+                    # 应用重置 (适配 Scaffold-GS: reset_anchor 替代 reset_xyz)
+                    gaussians.reset_anchor(xyz_vector, mask)
     
             if iteration < opt.iterations:
                 gaussians.optimizer.step()
