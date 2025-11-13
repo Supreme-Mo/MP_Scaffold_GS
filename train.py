@@ -119,6 +119,8 @@ def training(dataset, opt, pipe, dataset_name, testing_iterations, saving_iterat
 
         xyz = gaussians.get_anchor
         monodepth = resample_cam.depth
+        confidence_map = resample_cam.confidence_map
+        print("shape is :",confidence_map.shape)
         init_xyz, init_features = MutiPlane_anchor_init(monodepth, xyz, resample_cam, plane_num=16,
                                                  sample_size=20, muti_mode="neighbor",
                                                  itera_num=num)

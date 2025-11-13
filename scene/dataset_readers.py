@@ -45,6 +45,8 @@ class CameraInfo(NamedTuple):
     width: int
     height: int
     depth: np.array #增加深度
+    confidence_map: np.array = None   # 新增置信度图
+
 class SceneInfo(NamedTuple):
     point_cloud: BasicPointCloud
     train_cameras: list
@@ -115,7 +117,15 @@ def readColmapCameras(cam_extrinsics, cam_intrinsics, images_folder):
         depth_folder = os.path.join(os.path.dirname(images_folder), "DPT_depth") #往上退一层
         depth_path=os.path.join(depth_folder,f"{image_name}.npy")
         depth=np.load(depth_path)
-        cam_info = CameraInfo(uid=uid, R=R, T=T, FovY=FovY, FovX=FovX, image=image,depth=depth,focal=intr.params,
+
+        #修改   新增：置信度图
+        conf_folder = os.path.join(os.path.dirname(images_folder), "DPT_confidence")
+        conf_path = os.path.join(conf_folder, f"{image_name}.npy")
+        if os.path.exists(conf_path):
+            confidence_map = np.load(conf_path)
+        else:
+            confidence_map = np.ones_like(depth)  # 若无文件则默认全置信
+        cam_info = CameraInfo(uid=uid, R=R, T=T, FovY=FovY, FovX=FovX, image=image,depth=depth,confidence_map=confidence_map,focal=intr.params,
                               image_path=image_path, image_name=image_name, width=width, height=height)
         cam_infos.append(cam_info)
     sys.stdout.write('\n')
