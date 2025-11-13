@@ -43,8 +43,16 @@ def loadCam(args, id, cam_info, resolution_scale):
 
     gt_image = resized_image_rgb[:3, ...]
     loaded_mask = None
-    params=cam_info.focal
-    fx_new, fy_new, cx_new, cy_new = params[:4]
+    params = cam_info.focal
+    if len(params) == 3:
+    # SIMPLE_PINHOLE: [f, cx, cy]
+        f, cx_new, cy_new = params
+        fx_new = fy_new = f
+    else:
+    # PINHOLE: [fx, fy, cx, cy]
+        fx_new, fy_new, cx_new, cy_new = params[:4]
+    # params=cam_info.focal
+    # fx_new, fy_new, cx_new, cy_new = params[:4]
    
     scale_x = resolution[0] / orig_w
     scale_y = resolution[1] / orig_h
