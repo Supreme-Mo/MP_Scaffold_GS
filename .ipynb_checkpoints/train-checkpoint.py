@@ -204,7 +204,37 @@ def training(dataset, opt, pipe, dataset_name, testing_iterations, saving_iterat
         ssim_loss = (1.0 - ssim(image, gt_image))
         scaling_reg = scaling.prod(dim=1).mean()
         # #修改
-    
+        # losses = {}
+        # losses['image'] = Ll1
+        # losses['ssim'] = ssim_loss
+        # losses['scale'] = scaling_reg * 0.01
+        # if normal is not None and render_depth is not None:
+        #     # 只在可见点计算法线损失
+        #     opac = render_pkg["opac"]
+        #     mask_vis = (opac.detach() > 1e-5)
+            
+        #     d2n = depth2normal(render_depth, mask_vis, viewpoint_cam)
+
+        #     if iteration < 3000:
+        #         lambda_normal = 0.01
+        #         lambda_normal_local = 0.001
+        #     else:
+        #         lambda_normal = 0.0001
+        #         lambda_normal_local = 0.0001
+
+
+        #     losses['normal'] = cos_loss(d2n, normal)
+        #     losses['local_normal'] = get_normal_smoothness(normal, gt_image, k_size=3)
+        # loss_weights = {
+        #     "image": 1.0 - opt.lambda_dssim,  # 这里就体现了原公式的权重
+        #     "ssim": opt.lambda_dssim,
+        #     "scale": 0.01,
+        #     "normal": lambda_normal if 'normal' in losses else 0.0,
+        #     "local_normal": lambda_normal_local if 'local_normal' in losses else 0.0
+        #                 }   
+        # #修改
+        # #loss = (1.0 - opt.lambda_dssim) * Ll1 + opt.lambda_dssim * ssim_loss + 0.01*scaling_reg
+        # loss = sum([loss_weights[k] * v for k, v in losses.items()])
         loss = (1.0 - opt.lambda_dssim) * Ll1 + opt.lambda_dssim * ssim_loss + 0.01*scaling_reg
         loss.backward()
         #loss.backward(retain_graph=retain_grad)
@@ -244,15 +274,14 @@ def training(dataset, opt, pipe, dataset_name, testing_iterations, saving_iterat
                 torch.cuda.empty_cache()
             
                     
-            # Optimizer step
-         
+          
+    
             if iteration < opt.iterations:
                 gaussians.optimizer.step()
                 gaussians.optimizer.zero_grad(set_to_none = True)
             if (iteration in checkpoint_iterations):
                 logger.info("\n[ITER {}] Saving Checkpoint".format(iteration))
                 torch.save((gaussians.capture(), iteration), scene.model_path + "/chkpnt" + str(iteration) + ".pth")
-   
 
 def prepare_output_and_logger(args):    
     if not args.model_path:
