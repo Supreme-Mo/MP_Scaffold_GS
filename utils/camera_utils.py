@@ -72,13 +72,21 @@ def loadCam(args, id, cam_info, resolution_scale):
         depth_resized = F.interpolate(
             depth, size=(resolution[1], resolution[0]),
             mode=depth_interp, align_corners=False if depth_interp == 'bilinear' else None
-        ).squeeze().cpu().numpy()   
+        ).squeeze().cpu().numpy()
+    #缩放置信度图
+    if hasattr(cam_info, 'confidence_map') and cam_info.confidence_map is not None:
+        conf = torch.tensor(cam_info.confidence_map, dtype=torch.float32).unsqueeze(0).unsqueeze(0)  # [1,1,H,W]
+        confidence_resized = F.interpolate(
+            conf, size=(resolution[1], resolution[0]),
+            mode='bilinear', align_corners=False
+        ).squeeze().cpu().numpy()  
     # print(f'gt_image: {gt_image.shape}')
+    
     if resized_image_rgb.shape[1] == 4:
         loaded_mask = resized_image_rgb[3:4, ...]
 
     return Camera(colmap_id=cam_info.uid, R=cam_info.R, T=cam_info.T, 
-                  FoVx=cam_info.FovX, FoVy=cam_info.FovY,depth=depth_resized,focal=(fx_new, fy_new, cx_new, cy_new),
+                  FoVx=cam_info.FovX, FoVy=cam_info.FovY,depth=depth_resized,confidence_map=confidence_resized,focal=(fx_new, fy_new, cx_new, cy_new),
                   image=gt_image, gt_alpha_mask=loaded_mask,
                   image_name=cam_info.image_name, uid=id, data_device=args.data_device)
 

@@ -1,4 +1,4 @@
-scene='LLFF/horns_pro'
+scene='LLFF/fortress'
 exp_name='baseline'
 voxel_size=0.001
 update_init_factor=16
