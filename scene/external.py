@@ -248,7 +248,7 @@ def MutiPlane_anchor_init(monodepth, xyz, view_camera, confidence_map=None,  # �
             muti_plane_depth_range[plane_layer, 0] = dep
         if muti_plane_depth_range[plane_layer, 1] == 0 or dep > muti_plane_depth_range[plane_layer, 1]:
             muti_plane_depth_range[plane_layer, 1] = dep
-
+    muti_plane_depth_range[-1, 1] *= 1.2  # 最远平面深度适当放大
     # ========== 6️⃣ 坐标网格采样 ==========
     image1 = torch.zeros((H, W), device="cuda")
     image2 = torch.zeros((H, W), device="cuda")
@@ -318,7 +318,8 @@ def MutiPlane_anchor_init(monodepth, xyz, view_camera, confidence_map=None,  # �
 
     # ========== ✅ 🔟 输出阶段加入置信度权重 ==========
     anchor_points = points[0, :3].permute(1, 0)
-    anchor_feats = RGB_feature * weight.unsqueeze(1)   # ✅ 置信度加权特征
+    #anchor_feats = RGB_feature * weight.unsqueeze(1)   # ✅ 置信度加权特征#
+    anchor_feats = torch.randn((anchor_points.shape[0], feat_dim), device="cuda") * 0.1
     return anchor_points, anchor_feats, weight
 
 

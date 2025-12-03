@@ -125,7 +125,7 @@ def training(dataset, opt, pipe, dataset_name, testing_iterations, saving_iterat
         print("shape is :",confidence_map.shape)
         
         init_xyz, init_features,weight = MutiPlane_anchor_init(monodepth, xyz, resample_cam, plane_num=16,
-                                                 sample_size=20, muti_mode="neighbor",
+                                                 sample_size=40, muti_mode="max",
                                                  itera_num=num,confidence_map=confidence_map)
         gaussians.add_MultiPlane_init(new_xyzs=init_xyz, new_features=init_features)
         stage_idx+=1
